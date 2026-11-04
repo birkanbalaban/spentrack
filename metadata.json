@@ -1,0 +1,6 @@
+{
+  "name": "SpenTrack — AI Destekli Yalın Harcama, Ekstre ve Etiket Takip Sistemi",
+  "description": "Harcama tutarlarını takip edip etiketlendiren, fiş fotoğrafı, mobil bankacılık ekran görüntüsü ve PDF kredi kartı ekstresi okuyabilen, sohbet asistanlı minimalist finans uygulaması.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
