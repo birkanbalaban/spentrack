@@ -24,27 +24,27 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
   const gbpInTRY = rates?.rates.GBP ? (1 / rates.rates.GBP).toFixed(2) : '43,80';
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2">
       <section
         aria-label="Harcama Özet Metrikleri"
-        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5"
+        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"
       >
         {/* 1. Bu Ayki Toplam Harcama */}
-        <div className="bg-[#111114] border border-[#222226] rounded-xl p-4 flex flex-col justify-between min-h-[116px]">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl p-3.5 flex flex-col justify-between min-h-[96px]">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs sm:text-sm font-medium text-[#a1a1aa]">
               Bu Ayki Toplam Harcama
             </span>
             <Wallet className="w-4 h-4 text-[#71717a]" />
           </div>
-          <div className="mt-2.5">
+          <div className="mt-2">
             <div
               data-testid="metric-monthly-total"
               className="text-2xl sm:text-3xl font-bold tracking-tight text-[#f4f4f5] font-mono tabular-nums"
             >
               {formatCurrency(metrics.monthlyNetTotalTRY, displayCurrency, rates)}
             </div>
-            <div className="mt-1.5 text-xs text-[#71717a] flex flex-wrap items-center gap-1.5 font-mono tabular-nums">
+            <div className="mt-1 text-xs text-[#71717a] flex flex-wrap items-center gap-1.5 font-mono tabular-nums">
               <span>{activeMonthLabel} net toplam</span>
               {metrics.refundTotalTRY > 0 && (
                 <>
@@ -59,35 +59,35 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         </div>
 
         {/* 2. Günlük Ortalama Harcama */}
-        <div className="bg-[#111114] border border-[#222226] rounded-xl p-4 flex flex-col justify-between min-h-[116px]">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl p-3.5 flex flex-col justify-between min-h-[96px]">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs sm:text-sm font-medium text-[#a1a1aa]">
               Günlük Ortalama Harcama
             </span>
             <TrendingUp className="w-4 h-4 text-[#71717a]" />
           </div>
-          <div className="mt-2.5">
+          <div className="mt-2">
             <div
               data-testid="metric-daily-avg"
               className="text-2xl sm:text-3xl font-bold tracking-tight text-[#f4f4f5] font-mono tabular-nums"
             >
               {formatCurrency(metrics.dailyAverageTRY, displayCurrency, rates)}
             </div>
-            <div className="mt-1.5 text-xs text-[#71717a]">
+            <div className="mt-1 text-xs text-[#71717a]">
               Günlük net harcama temposu
             </div>
           </div>
         </div>
 
         {/* 3. En Çok Harcanan Kategori & Etiket */}
-        <div className="bg-[#111114] border border-[#222226] rounded-xl p-4 flex flex-col justify-between min-h-[116px]">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl p-3.5 flex flex-col justify-between min-h-[96px]">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs sm:text-sm font-medium text-[#a1a1aa]">
               En Yoğun Kategori & Etiket
             </span>
             <PieChart className="w-4 h-4 text-[#71717a]" />
           </div>
-          <div className="mt-2.5">
+          <div className="mt-2">
             <div className="flex items-center gap-2">
               {metrics.topCategory && (
                 <span
@@ -104,7 +104,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
                 </span>
               )}
             </div>
-            <div className="mt-1.5 text-xs text-[#a1a1aa] flex flex-wrap items-center gap-1.5">
+            <div className="mt-1 text-xs text-[#a1a1aa] flex flex-wrap items-center gap-1.5">
               {metrics.topTag ? (
                 <>
                   <span className="text-[#71717a]">Lider etiket:</span>
@@ -129,14 +129,14 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         </div>
 
         {/* 4. Toplam İşlem Sayısı */}
-        <div className="bg-[#111114] border border-[#222226] rounded-xl p-4 flex flex-col justify-between min-h-[116px]">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl p-3.5 flex flex-col justify-between min-h-[96px]">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs sm:text-sm font-medium text-[#a1a1aa]">
               Toplam İşlem Sayısı
             </span>
             <CheckCircle2 className="w-4 h-4 text-[#71717a]" />
           </div>
-          <div className="mt-2.5">
+          <div className="mt-2">
             <div
               data-testid="metric-tx-count"
               className="flex items-baseline gap-2"
@@ -146,7 +146,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
               </span>
               <span className="text-sm font-medium text-[#a1a1aa]">Kayıt</span>
             </div>
-            <div className="mt-1.5 text-xs text-[#71717a]">
+            <div className="mt-1 text-xs text-[#71717a]">
               Fiş, ekstre ve manuel işlemler etkin
             </div>
           </div>

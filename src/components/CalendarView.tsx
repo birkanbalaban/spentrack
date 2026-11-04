@@ -154,16 +154,16 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
               Bu tarihte kayıtlı harcama bulunmuyor.
             </p>
           ) : (
-            <div className="divide-y divide-[#27272a]/60 mt-2">
+            <div className="divide-y divide-[#27272a]/60 mt-1.5">
               {selectedDayData.items.map((item) => (
                 <div
                   key={item.id}
                   onClick={() => onSelectExpense(item)}
-                  className="py-3 flex items-center justify-between gap-4 hover:bg-[#18181b]/40 px-2 rounded-lg cursor-pointer"
+                  className="py-1.5 flex items-center justify-between gap-3 hover:bg-[#18181b]/40 px-2 rounded-lg cursor-pointer leading-tight"
                 >
                   <div>
                     <div className="text-sm font-medium text-[#f4f4f5]">{item.title}</div>
-                    <div className="text-xs text-[#71717a] mt-0.5">
+                    <div className="text-xs text-[#71717a]">
                       {item.category} · {item.tags.join(' ')}
                     </div>
                   </div>

@@ -60,7 +60,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
   }
 
   return (
-    <div className="space-y-3.5" data-testid="expense-list-view">
+    <div className="space-y-2.5" data-testid="expense-list-view">
       {groups.map((group) => (
         <section
           key={group.date}
@@ -68,8 +68,8 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
           className="bg-[#111114] border border-[#222226] rounded-xl overflow-hidden"
         >
           {/* Gün Başlığı */}
-          <div className="px-4 py-2.5 bg-[#16161a] border-b border-[#222226] flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 text-xs sm:text-sm">
+          <div className="px-3.5 py-1.5 bg-[#16161a] border-b border-[#222226] flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 text-xs sm:text-sm leading-tight">
               <span className="font-bold text-[#f4f4f5]">
                 {group.displayDate}
               </span>
@@ -78,7 +78,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                 {group.date}
               </span>
             </div>
-            <div className="text-xs sm:text-sm font-mono tabular-nums font-semibold text-[#a1a1aa]">
+            <div className="text-xs sm:text-sm font-mono tabular-nums font-semibold text-[#a1a1aa] leading-tight">
               Gün Toplamı:{' '}
               <span className={group.dayTotalTRY < 0 ? 'text-[#10b981]' : 'text-[#f4f4f5]'}>
                 {formatCurrency(group.dayTotalTRY, displayCurrency, rates)}
@@ -96,17 +96,17 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                 <div
                   key={item.id}
                   data-testid="expense-row"
-                  className="px-4 py-2.5 hover:bg-[#16161a]/70 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  className="px-3.5 py-1.5 hover:bg-[#16161a]/70 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                 >
-                  <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+                  <div className="flex items-start sm:items-center gap-2.5 min-w-0 flex-1">
                     {/* Renkli Kategori Noktası (SubTrack Stili) */}
                     <span
-                      className="w-2.5 h-2.5 rounded-full shrink-0 mt-1.5 sm:mt-0"
+                      className="w-2 h-2 rounded-full shrink-0 mt-1.5 sm:mt-0"
                       style={{ backgroundColor: catColor }}
                     />
 
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 leading-tight">
                         <span className="text-sm font-semibold text-[#f4f4f5] truncate">
                           {item.title}
                         </span>
@@ -118,7 +118,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                       </div>
 
                       {/* Zero-Pill Metadata Discipline: Clean unboxed inline text with · separators and distinct tag colors */}
-                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#a1a1aa]">
+                      <div className="mt-0 flex flex-wrap items-center gap-x-1.5 gap-y-0 text-xs leading-tight text-[#a1a1aa]">
                         <span
                           className="font-medium"
                           style={{ color: catColor }}
@@ -159,8 +159,8 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                   </div>
 
                   {/* Sağ: Tutar ve Aksiyonlar */}
-                  <div className="flex items-center justify-between sm:justify-end gap-3.5 shrink-0 pl-5 sm:pl-0">
-                    <div className="text-right font-mono tabular-nums">
+                  <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0 pl-4 sm:pl-0">
+                    <div className="text-right font-mono tabular-nums leading-tight">
                       <div
                         className={`text-sm sm:text-base font-bold ${
                           isRefund ? 'text-[#10b981]' : 'text-[#f4f4f5]'
@@ -177,12 +177,12 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-0.5">
                       <button
                         type="button"
                         onClick={() => onEdit(item)}
                         aria-label={`Düzenle ${item.title}`}
-                        className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-[#27272a]/70 transition-colors cursor-pointer"
+                        className="min-h-[26px] min-w-[26px] flex items-center justify-center rounded-md text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-[#27272a]/70 transition-colors cursor-pointer"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
@@ -190,7 +190,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                         type="button"
                         onClick={() => onDelete(item.id)}
                         aria-label={`Sil ${item.title}`}
-                        className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-[#a1a1aa] hover:text-[#f43f5e] hover:bg-[#f43f5e]/10 transition-colors cursor-pointer"
+                        className="min-h-[26px] min-w-[26px] flex items-center justify-center rounded-md text-[#a1a1aa] hover:text-[#f43f5e] hover:bg-[#f43f5e]/10 transition-colors cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>

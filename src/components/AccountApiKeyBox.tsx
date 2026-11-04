@@ -1,10 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { ExternalLink, Check, Loader2 } from 'lucide-react';
+import { ExternalLink, Check, Loader2, Eye, EyeOff } from 'lucide-react';
+
+export function sanitizeClientApiKey(raw: string): string {
+  if (!raw) return '';
+  let cleaned = raw
+    .replace(/[\u200B-\u200D\uFEFF\r\n\t]/g, '')
+    .trim()
+    .replace(/^(?:GEMINI_API_KEY|VITE_GEMINI_API_KEY|API_KEY|Bearer)\s*[:=]\s*/i, '')
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+
+  const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
+  if (aizaMatch) {
+    cleaned = aizaMatch[0];
+  }
+  return cleaned;
+}
 
 interface AccountApiKeyBoxProps {
   savedApiKey: string;
   isAuthenticated: boolean;
   onSaveApiKey: (apiKey: string) => Promise<void>;
+  onDraftKeyChange?: (draftKey: string) => void;
   compact?: boolean;
 }
 
@@ -12,9 +29,11 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
   savedApiKey,
   isAuthenticated,
   onSaveApiKey,
+  onDraftKeyChange,
   compact = false,
 }) => {
   const [draftKey, setDraftKey] = useState(savedApiKey || '');
+  const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -22,16 +41,32 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
     setDraftKey(savedApiKey || '');
   }, [savedApiKey]);
 
+  const updateDraft = (val: string) => {
+    setDraftKey(val);
+    onDraftKeyChange?.(sanitizeClientApiKey(val));
+    if (feedback) setFeedback(null);
+  };
+
   const handleSave = async () => {
-    const trimmed = draftKey.trim();
-    if (!trimmed) {
+    const cleaned = sanitizeClientApiKey(draftKey);
+    if (!cleaned) {
       setFeedback({ type: 'err', text: 'Lütfen geçerli bir Gemini API anahtarı girin.' });
       return;
     }
+    if (!cleaned.startsWith('AIza') || cleaned.length < 30) {
+      setFeedback({
+        type: 'err',
+        text: "Geçersiz anahtar formatı. Google Gemini API anahtarları 'AIza' ile başlar (örn: AIzaSy...).",
+      });
+      return;
+    }
+
+    setDraftKey(cleaned);
+    onDraftKeyChange?.(cleaned);
     setSaving(true);
     setFeedback(null);
     try {
-      await onSaveApiKey(trimmed);
+      await onSaveApiKey(cleaned);
       setFeedback({
         type: 'ok',
         text: isAuthenticated
@@ -54,6 +89,7 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
     try {
       await onSaveApiKey('');
       setDraftKey('');
+      onDraftKeyChange?.('');
       setFeedback({
         type: 'ok',
         text: 'API anahtarı hesabınızdan kaldırıldı.',
@@ -95,23 +131,31 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
       </div>
 
       <div className="flex items-center gap-2">
-        <input
-          type="password"
-          aria-label="Gemini API Anahtarı"
-          value={draftKey}
-          onChange={(e) => {
-            setDraftKey(e.target.value);
-            if (feedback) setFeedback(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              handleSave();
-            }
-          }}
-          placeholder="AIzaSy..."
-          className="flex-1 min-w-0 px-3.5 py-2 bg-[#09090b] border border-[#27272a] rounded-xl text-xs sm:text-sm font-mono text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
-        />
+        <div className="relative flex-1 min-w-0">
+          <input
+            type={showKey ? 'text' : 'password'}
+            aria-label="Gemini API Anahtarı"
+            value={draftKey}
+            onChange={(e) => updateDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleSave();
+              }
+            }}
+            placeholder="AIzaSy..."
+            className="w-full pl-3.5 pr-9 py-2 bg-[#09090b] border border-[#27272a] rounded-xl text-xs sm:text-sm font-mono text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
+          />
+          <button
+            type="button"
+            onClick={() => setShowKey((prev) => !prev)}
+            aria-label={showKey ? 'Anahtarı gizle' : 'Anahtarı göster'}
+            title={showKey ? 'Anahtarı gizle' : 'Anahtarı göster'}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#71717a] hover:text-[#f4f4f5] cursor-pointer"
+          >
+            {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        </div>
         <button
           type="button"
           onClick={handleSave}

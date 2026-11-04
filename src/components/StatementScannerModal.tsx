@@ -22,7 +22,7 @@ import {
   parseTurkishAmount,
 } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
-import { AccountApiKeyBox } from './AccountApiKeyBox';
+import { AccountApiKeyBox, sanitizeClientApiKey } from './AccountApiKeyBox';
 
 interface StatementScannerModalProps {
   isOpen: boolean;
@@ -54,7 +54,12 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
   const [detectedBank, setDetectedBank] = useState('');
   const [summaryNote, setSummaryNote] = useState('');
   const [candidates, setCandidates] = useState<MarkedCandidate[]>([]);
+  const [liveDraftKey, setLiveDraftKey] = useState<string>(customApiKey || '');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setLiveDraftKey(customApiKey || '');
+  }, [customApiKey]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -106,12 +111,17 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
     setAnalyzing(true);
     setError('');
     try {
+      const activeKey = sanitizeClientApiKey(liveDraftKey || customApiKey);
+      if (activeKey && activeKey !== customApiKey && activeKey.startsWith('AIza')) {
+        onSaveApiKey(activeKey).catch(() => {});
+      }
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...authHeaders,
       };
-      if (customApiKey) {
-        headers['x-custom-gemini-key'] = customApiKey;
+      if (activeKey) {
+        headers['x-custom-gemini-key'] = activeKey;
       }
 
       const res = await fetch('/api/ai/extract', {
@@ -138,7 +148,14 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
       setSummaryNote(data.summaryNote || `${marked.length} harcama satırı ayrıştırıldı.`);
       setCandidates(marked);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Analiz sırasında bir hata oluştu.');
+      const rawMsg = err instanceof Error ? err.message : 'Analiz sırasında bir hata oluştu.';
+      if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid')) {
+        setError(
+          "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı kontrol edin veya aşağıdaki kutuya 'AIza...' ile başlayan geçerli bir Google AI Studio API anahtarı girip Kaydet'e basın."
+        );
+      } else {
+        setError(rawMsg);
+      }
     } finally {
       setAnalyzing(false);
     }
@@ -303,6 +320,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
             savedApiKey={customApiKey}
             isAuthenticated={isAuthenticated}
             onSaveApiKey={onSaveApiKey}
+            onDraftKeyChange={setLiveDraftKey}
           />
 
           {/* Dosya Yükleme Alanı */}
@@ -405,17 +423,17 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
               <div className="bg-[#121215] border border-[#27272a] rounded-xl overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
-                    <tr className="border-b border-[#27272a] text-[11px] font-medium text-[#71717a]">
-                      <th className="py-2.5 px-3 w-10">Seç</th>
-                      <th className="py-2.5 px-3">Durum / Tarih</th>
-                      <th className="py-2.5 px-3">İşyeri / Başlık</th>
-                      <th className="py-2.5 px-3">Kategori</th>
-                      <th className="py-2.5 px-3">Etiketler (#tag)</th>
-                      <th className="py-2.5 px-3">Not / Taksit</th>
-                      <th className="py-2.5 px-3 text-right">Tutar (TL)</th>
+                    <tr className="border-b border-[#27272a] text-[11px] font-medium text-[#71717a] leading-tight">
+                      <th className="py-1.5 px-2.5 w-8">Seç</th>
+                      <th className="py-1.5 px-2.5">Durum / Tarih</th>
+                      <th className="py-1.5 px-2.5">İşyeri / Başlık</th>
+                      <th className="py-1.5 px-2.5">Kategori</th>
+                      <th className="py-1.5 px-2.5">Etiketler (#tag)</th>
+                      <th className="py-1.5 px-2.5">Not / Taksit</th>
+                      <th className="py-1.5 px-2.5 text-right">Tutar (TL)</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#27272a]/60 text-xs">
+                  <tbody className="divide-y divide-[#27272a]/60 text-xs leading-tight">
                     {candidates.map((row) => (
                       <tr
                         key={row.tempId}
@@ -425,7 +443,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             : 'hover:bg-[#18181b]/60'
                         }
                       >
-                        <td className="py-2.5 px-3">
+                        <td className="py-1 px-2.5">
                           <input
                             type="checkbox"
                             aria-label={`Seç ${row.title}`}
@@ -436,7 +454,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             className="rounded border-[#27272a] bg-[#09090b] text-[#10b981] cursor-pointer"
                           />
                         </td>
-                        <td className="py-2.5 px-3 whitespace-nowrap">
+                        <td className="py-1 px-2.5 whitespace-nowrap">
                           <input
                             type="date"
                             aria-label="İşlem tarihi"
@@ -444,19 +462,19 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             onChange={(e) =>
                               updateCandidate(row.tempId, { date: e.target.value })
                             }
-                            className="bg-[#09090b] border border-[#27272a] rounded px-1.5 py-1 text-xs font-mono tabular-nums text-[#f4f4f5]"
+                            className="bg-[#09090b] border border-[#27272a] rounded px-1.5 py-0.5 text-xs font-mono tabular-nums text-[#f4f4f5]"
                           />
                           {row.isDuplicate && (
                             <div
                               title={row.duplicateReason}
-                              className="mt-1 text-[11px] font-medium text-[#f59e0b] flex items-center gap-1"
+                              className="mt-0.5 text-[11px] font-medium text-[#f59e0b] flex items-center gap-1"
                             >
                               <AlertTriangle className="w-3 h-3 shrink-0" />
                               <span>Mükerrer Olabilir</span>
                             </div>
                           )}
                         </td>
-                        <td className="py-2.5 px-2.5">
+                        <td className="py-1 px-2">
                           <input
                             type="text"
                             aria-label="İşyeri başlığı"
@@ -464,10 +482,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             onChange={(e) =>
                               updateCandidate(row.tempId, { title: e.target.value })
                             }
-                            className="w-full min-w-[120px] bg-[#09090b] border border-[#27272a] rounded px-2 py-1 text-xs text-[#f4f4f5]"
+                            className="w-full min-w-[120px] bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs text-[#f4f4f5]"
                           />
                         </td>
-                        <td className="py-2.5 px-2.5">
+                        <td className="py-1 px-2">
                           <select
                             aria-label="Kategori"
                             value={row.category}
@@ -476,7 +494,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                                 category: e.target.value as ExpenseCategory,
                               })
                             }
-                            className="bg-[#09090b] border border-[#27272a] rounded px-2 py-1 text-xs text-[#f4f4f5]"
+                            className="bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs text-[#f4f4f5]"
                           >
                             {FIXED_CATEGORIES.map((c) => (
                               <option key={c} value={c}>
@@ -485,7 +503,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             ))}
                           </select>
                         </td>
-                        <td className="py-2.5 px-2.5">
+                        <td className="py-1 px-2">
                           <input
                             type="text"
                             aria-label="Etiketler"
@@ -495,10 +513,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                                 tags: e.target.value.split(/[\s,]+/).filter(Boolean),
                               })
                             }
-                            className="w-full min-w-[110px] bg-[#09090b] border border-[#27272a] rounded px-2 py-1 text-xs font-mono text-[#10b981]"
+                            className="w-full min-w-[110px] bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs font-mono text-[#10b981]"
                           />
                         </td>
-                        <td className="py-2.5 px-2.5">
+                        <td className="py-1 px-2">
                           <input
                             type="text"
                             aria-label="Not veya taksit"
@@ -507,10 +525,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                               updateCandidate(row.tempId, { notes: e.target.value })
                             }
                             placeholder="Örn: 2/6 Taksit"
-                            className="w-full min-w-[95px] bg-[#09090b] border border-[#27272a] rounded px-2 py-1 text-xs text-[#a1a1aa]"
+                            className="w-full min-w-[95px] bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs text-[#a1a1aa]"
                           />
                         </td>
-                        <td className="py-2.5 px-2.5 text-right">
+                        <td className="py-1 px-2 text-right">
                           <input
                             type="number"
                             step="0.01"
@@ -523,7 +541,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                                 amountInTRY: val,
                               });
                             }}
-                            className={`w-24 text-right bg-[#09090b] border border-[#27272a] rounded px-2 py-1 text-xs font-mono tabular-nums font-semibold ${
+                            className={`w-24 text-right bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs font-mono tabular-nums font-semibold ${
                               row.amount < 0 ? 'text-[#10b981]' : 'text-[#f4f4f5]'
                             }`}
                           />

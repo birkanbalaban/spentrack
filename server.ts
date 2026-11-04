@@ -188,27 +188,76 @@ Kullanıcı sana iki tür istekte bulunabilir:
    - Rakamları kuruşuna kadar doğru topla, iadeleri düş ve çok net, okunaklı bir Türkçe yanıt ("reply") üret.
    - Eğer bir soru/analiz yanıtlıyorsan ve yeni harcama eklenmiyorsa "proposedExpenses" dizisini boş ([]) bırak ve "analysisHighlight" alanını doldur.`;
 
-function resolveUserOrServerApiKey(userId: string, customKey?: string): string | null {
+function sanitizeGeminiApiKey(raw?: string | null): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let cleaned = raw
+    .replace(/[\u200B-\u200D\uFEFF\r\n\t]/g, '')
+    .trim()
+    .replace(/^(?:GEMINI_API_KEY|VITE_GEMINI_API_KEY|API_KEY|Bearer)\s*[:=]\s*/i, '')
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+
+  const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
+  if (aizaMatch) {
+    cleaned = aizaMatch[0];
+  }
+
+  if (
+    !cleaned ||
+    cleaned.length < 15 ||
+    cleaned === 'MY_GEMINI_API_KEY' ||
+    cleaned === 'YOUR_API_KEY' ||
+    cleaned === 'undefined' ||
+    cleaned === 'null'
+  ) {
+    return null;
+  }
+  return cleaned;
+}
+
+function getCandidateApiKeys(userId: string, customKey?: string): string[] {
+  const candidates: string[] = [];
+  const pushUnique = (val?: string | null) => {
+    const clean = sanitizeGeminiApiKey(val);
+    if (clean && !candidates.includes(clean)) {
+      candidates.push(clean);
+    }
+  };
+
+  pushUnique(customKey);
+
   if (userId && userId !== 'default_user') {
     try {
       const row = db
         .prepare('SELECT gemini_api_key FROM users WHERE id = ?')
         .get(userId) as { gemini_api_key?: string } | undefined;
-      if (row?.gemini_api_key && row.gemini_api_key.trim().length > 10) {
-        return row.gemini_api_key.trim();
-      }
+      pushUnique(row?.gemini_api_key);
     } catch {
       // ignore
     }
   }
-  if (customKey && customKey.trim().length > 10) {
-    return customKey.trim();
+
+  pushUnique(process.env.GEMINI_API_KEY);
+  pushUnique(process.env.API_KEY);
+
+  return candidates;
+}
+
+function formatGeminiErrorMessage(err: unknown): { status: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || 'Belge analiz edilirken hata oluştu.');
+  if (
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('API key not valid') ||
+    raw.includes('INVALID_ARGUMENT') ||
+    raw.includes('PERMISSION_DENIED')
+  ) {
+    return {
+      status: 400,
+      message:
+        "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı kontrol edin veya üstteki API Anahtarı kutusuna 'AIza...' ile başlayan geçerli bir Google AI Studio API anahtarı girip Kaydet'e basın.",
+    };
   }
-  const envKey = process.env.GEMINI_API_KEY;
-  if (envKey && envKey !== 'MY_GEMINI_API_KEY' && envKey.trim().length > 10) {
-    return envKey.trim();
-  }
-  return null;
+  return { status: 500, message: raw };
 }
 
 /**
@@ -519,7 +568,8 @@ async function startServer() {
         });
         return;
       }
-      const apiKey = String(req.body?.apiKey || '').trim();
+      const rawInput = String(req.body?.apiKey || '').trim();
+      const apiKey = rawInput ? sanitizeGeminiApiKey(rawInput) || rawInput : '';
 
       db.prepare(
         `INSERT INTO users (id, email, name, gemini_api_key, updated_at)
@@ -728,24 +778,15 @@ async function startServer() {
       const userId = getUserId(req);
       const { files = [], existingTags = [], textPrompt = '' } = req.body || {};
       const customKey = req.headers['x-custom-gemini-key'] as string | undefined;
-      const apiKey = resolveUserOrServerApiKey(userId, customKey);
+      const candidateKeys = getCandidateApiKeys(userId, customKey);
 
-      if (!apiKey) {
+      if (candidateKeys.length === 0) {
         res.status(400).json({
           error:
-            'Hesabınıza tanımlı bir Gemini API anahtarı bulunamadı. Lütfen üstteki API Anahtarı alanından kendi ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
+            "Tanımlı bir Gemini API anahtarı bulunamadı. Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı seçin veya üstteki API Anahtarı alanından ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.",
         });
         return;
       }
-
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
 
       const parts: Record<string, unknown>[] = [];
       for (const f of files) {
@@ -766,62 +807,89 @@ Kullanıcının mevcut #etiket havuzu (uygunsa bunları önceliklendir): ${(exis
 ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstresindeki tüm geçerli harcama ve iade satırlarını kurallara uygun olarak ayıkla.'}`,
       });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: { parts },
-        config: {
-          systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              detectedBank: {
-                type: Type.STRING,
-                description: 'Tespit edilen banka veya kart adı (örn: Yapı Kredi World, Sağlam Kart)',
-              },
-              summaryNote: {
-                type: Type.STRING,
-                description: 'Ayrıştırma özeti (örn: 5 harcama, 1 taksit, 1 iade tespit edildi, 2 ödeme satırı yok sayıldı)',
-              },
-              expenses: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING, description: 'İşyeri veya harcama başlığı' },
-                    amount: {
-                      type: Type.NUMBER,
-                      description: 'Dönem harcama tutarı (İadeler için negatif -amount, taksitler için sadece tek taksit tutarı)',
-                    },
-                    currency: { type: Type.STRING, description: 'TRY, USD, EUR veya GBP' },
-                    amountInTRY: { type: Type.NUMBER, description: 'TL karşılığı tutar' },
-                    category: {
-                      type: Type.STRING,
-                      enum: [...FIXED_CATEGORIES],
-                      description: 'Sabit 8 kategoriden biri',
-                    },
-                    tags: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: 'Banka etiketi (#yapikredi, #saglamkart vb.) ve işlem etiketleri (#kahve, #taksit, #iade)',
-                    },
-                    date: { type: Type.STRING, description: 'YYYY-MM-DD formatında işlem tarihi' },
-                    notes: {
-                      type: Type.STRING,
-                      description: 'Taksit bilgisi (örn: 2/6 Taksit) veya ek açıklama',
-                    },
-                  },
-                  required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                },
+      let responseText = '';
+      let lastError: unknown = null;
+
+      for (const apiKey of candidateKeys) {
+        try {
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: {
+              headers: {
+                'User-Agent': 'aistudio-build',
               },
             },
-            required: ['expenses'],
-          },
-        },
-      });
+          });
 
-      const rawJson = (response.text || '{}').trim();
-      const parsed = JSON.parse(rawJson);
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: { parts },
+            config: {
+              systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  detectedBank: {
+                    type: Type.STRING,
+                    description: 'Tespit edilen banka veya kart adı (örn: Yapı Kredi World, Sağlam Kart)',
+                  },
+                  summaryNote: {
+                    type: Type.STRING,
+                    description: 'Ayrıştırma özeti (örn: 5 harcama, 1 taksit, 1 iade tespit edildi, 2 ödeme satırı yok sayıldı)',
+                  },
+                  expenses: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING, description: 'İşyeri veya harcama başlığı' },
+                        amount: {
+                          type: Type.NUMBER,
+                          description: 'Dönem harcama tutarı (İadeler için negatif -amount, taksitler için sadece tek taksit tutarı)',
+                        },
+                        currency: { type: Type.STRING, description: 'TRY, USD, EUR veya GBP' },
+                        amountInTRY: { type: Type.NUMBER, description: 'TL karşılığı tutar' },
+                        category: {
+                          type: Type.STRING,
+                          enum: [...FIXED_CATEGORIES],
+                          description: 'Sabit 8 kategoriden biri',
+                        },
+                        tags: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                          description: 'Banka etiketi (#yapikredi, #saglamkart vb.) ve işlem etiketleri (#kahve, #taksit, #iade)',
+                        },
+                        date: { type: Type.STRING, description: 'YYYY-MM-DD formatında işlem tarihi' },
+                        notes: {
+                          type: Type.STRING,
+                          description: 'Taksit bilgisi (örn: 2/6 Taksit) veya ek açıklama',
+                        },
+                      },
+                      required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
+                    },
+                  },
+                },
+                required: ['expenses'],
+              },
+            },
+          });
+
+          responseText = (response.text || '{}').trim();
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (lastError) {
+        const formatted = formatGeminiErrorMessage(lastError);
+        res.status(formatted.status).json({ error: formatted.message });
+        return;
+      }
+
+      const parsed = JSON.parse(responseText || '{}');
       const normalizedExpenses: ExtractedExpense[] = (parsed.expenses || []).map(
         (item: Record<string, unknown>) => ({
           title: String(item.title || 'Harcama').trim(),
@@ -843,8 +911,8 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
         expenses: normalizedExpenses,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Belge analiz edilirken hata oluştu.';
-      res.status(500).json({ error: msg });
+      const formatted = formatGeminiErrorMessage(err);
+      res.status(formatted.status).json({ error: formatted.message });
     }
   });
 
@@ -861,31 +929,22 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
     try {
       const userId = getUserId(req);
       const customKey = req.headers['x-custom-gemini-key'] as string | undefined;
-      const apiKey = resolveUserOrServerApiKey(userId, customKey);
+      const candidateKeys = getCandidateApiKeys(userId, customKey);
 
-      if (!apiKey && (!files || files.length === 0)) {
+      if (candidateKeys.length === 0 && (!files || files.length === 0)) {
         // Fallback local deterministic assistant when no API key is set
         const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
         res.json(fallback);
         return;
       }
 
-      if (!apiKey) {
+      if (candidateKeys.length === 0) {
         res.status(400).json({
           error:
-            'Dosya analizi için Gemini API anahtarı gereklidir. Lütfen ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
+            "Dosya analizi için Gemini API anahtarı gereklidir. Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı seçin veya ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.",
         });
         return;
       }
-
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
 
       const parts: Record<string, unknown>[] = [];
       for (const f of files) {
@@ -918,53 +977,86 @@ ${JSON.stringify(compactLedger)}
 Kullanıcı mesajı: "${message}"`,
       });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: { parts },
-        config: {
-          systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: {
-                type: Type.STRING,
-                description: 'Kullanıcıya gösterilecek Türkçe yanıt veya analiz sonucu',
-              },
-              proposedExpenses: {
-                type: Type.ARRAY,
-                description: 'Kullanıcı harcama eklemek istediyse veya dosya yüklediyse çıkarılan harcamalar listesi',
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    currency: { type: Type.STRING },
-                    amountInTRY: { type: Type.NUMBER },
-                    category: { type: Type.STRING, enum: [...FIXED_CATEGORIES] },
-                    tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    date: { type: Type.STRING },
-                    notes: { type: Type.STRING },
-                  },
-                  required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                },
-              },
-              analysisHighlight: {
-                type: Type.OBJECT,
-                description: 'Eğer kullanıcı harcama analizi sorduysa hesaplanan özet metrik',
-                properties: {
-                  label: { type: Type.STRING },
-                  totalTRY: { type: Type.NUMBER },
-                  count: { type: Type.NUMBER },
-                },
+      let responseText = '';
+      let lastError: unknown = null;
+
+      for (const apiKey of candidateKeys) {
+        try {
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: {
+              headers: {
+                'User-Agent': 'aistudio-build',
               },
             },
-            required: ['reply', 'proposedExpenses'],
-          },
-        },
-      });
+          });
 
-      const parsed = JSON.parse((response.text || '{}').trim());
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: { parts },
+            config: {
+              systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  reply: {
+                    type: Type.STRING,
+                    description: 'Kullanıcıya gösterilecek Türkçe yanıt veya analiz sonucu',
+                  },
+                  proposedExpenses: {
+                    type: Type.ARRAY,
+                    description: 'Kullanıcı harcama eklemek istediyse veya dosya yüklediyse çıkarılan harcamalar listesi',
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        amount: { type: Type.NUMBER },
+                        currency: { type: Type.STRING },
+                        amountInTRY: { type: Type.NUMBER },
+                        category: { type: Type.STRING, enum: [...FIXED_CATEGORIES] },
+                        tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        date: { type: Type.STRING },
+                        notes: { type: Type.STRING },
+                      },
+                      required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
+                    },
+                  },
+                  analysisHighlight: {
+                    type: Type.OBJECT,
+                    description: 'Eğer kullanıcı harcama analizi sorduysa hesaplanan özet metrik',
+                    properties: {
+                      label: { type: Type.STRING },
+                      totalTRY: { type: Type.NUMBER },
+                      count: { type: Type.NUMBER },
+                    },
+                  },
+                },
+                required: ['reply', 'proposedExpenses'],
+              },
+            },
+          });
+
+          responseText = (response.text || '{}').trim();
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (lastError) {
+        if (!files || files.length === 0) {
+          const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
+          res.json(fallback);
+          return;
+        }
+        const formatted = formatGeminiErrorMessage(lastError);
+        res.status(formatted.status).json({ error: formatted.message });
+        return;
+      }
+
+      const parsed = JSON.parse(responseText || '{}');
       const normalizedExpenses: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
         (item: Record<string, unknown>) => ({
           title: String(item.title || 'Harcama').trim(),
@@ -992,8 +1084,8 @@ Kullanıcı mesajı: "${message}"`,
         res.json(fallback);
         return;
       }
-      const msg = err instanceof Error ? err.message : 'Asistan yanıt veremedi.';
-      res.status(500).json({ error: msg });
+      const formatted = formatGeminiErrorMessage(err);
+      res.status(formatted.status).json({ error: formatted.message });
     }
   });
 

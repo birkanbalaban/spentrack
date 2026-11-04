@@ -82,33 +82,83 @@ Kullanıcı sana iki tür istekte bulunabilir:
 
 const memoryUserKeys = new Map<string, string>();
 
-async function resolveApiKey(env: Env, request: Request, userId: string): Promise<string | null> {
+function sanitizeGeminiApiKey(raw?: string | null): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let cleaned = raw
+    .replace(/[\u200B-\u200D\uFEFF\r\n\t]/g, '')
+    .trim()
+    .replace(/^(?:GEMINI_API_KEY|VITE_GEMINI_API_KEY|API_KEY|Bearer)\s*[:=]\s*/i, '')
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+
+  const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
+  if (aizaMatch) {
+    cleaned = aizaMatch[0];
+  }
+
+  if (
+    !cleaned ||
+    cleaned.length < 15 ||
+    cleaned === 'MY_GEMINI_API_KEY' ||
+    cleaned === 'YOUR_API_KEY' ||
+    cleaned === 'undefined' ||
+    cleaned === 'null'
+  ) {
+    return null;
+  }
+  return cleaned;
+}
+
+async function getCandidateApiKeys(
+  env: Env & { API_KEY?: string },
+  request: Request,
+  userId: string
+): Promise<string[]> {
+  const candidates: string[] = [];
+  const pushUnique = (val?: string | null) => {
+    const clean = sanitizeGeminiApiKey(val);
+    if (clean && !candidates.includes(clean)) {
+      candidates.push(clean);
+    }
+  };
+
+  pushUnique(request.headers.get('x-custom-gemini-key'));
+
   if (userId && userId !== 'default_user') {
     if (env.DB) {
       try {
         const row = await env.DB.prepare('SELECT gemini_api_key FROM users WHERE id = ?')
           .bind(userId)
           .first<{ gemini_api_key?: string }>();
-        if (row?.gemini_api_key && row.gemini_api_key.trim().length > 10) {
-          return row.gemini_api_key.trim();
-        }
+        pushUnique(row?.gemini_api_key);
       } catch {
         // ignore
       }
     }
-    const memKey = memoryUserKeys.get(userId);
-    if (memKey && memKey.trim().length > 10) {
-      return memKey.trim();
-    }
+    pushUnique(memoryUserKeys.get(userId));
   }
-  const customKey = request.headers.get('x-custom-gemini-key');
-  if (customKey && customKey.trim().length > 10) {
-    return customKey.trim();
+
+  pushUnique(env.GEMINI_API_KEY);
+  pushUnique(env.API_KEY);
+
+  return candidates;
+}
+
+function formatGeminiErrorMessage(err: unknown): { status: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || 'Belge analiz edilirken hata oluştu.');
+  if (
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('API key not valid') ||
+    raw.includes('INVALID_ARGUMENT') ||
+    raw.includes('PERMISSION_DENIED')
+  ) {
+    return {
+      status: 400,
+      message:
+        "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı kontrol edin veya üstteki API Anahtarı kutusuna 'AIza...' ile başlayan geçerli bir Google AI Studio API anahtarı girip Kaydet'e basın.",
+    };
   }
-  if (env.GEMINI_API_KEY && env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && env.GEMINI_API_KEY.trim().length > 10) {
-    return env.GEMINI_API_KEY.trim();
-  }
-  return null;
+  return { status: 500, message: raw };
 }
 
 function fallbackNaturalLanguageAssist(
@@ -503,7 +553,8 @@ export default {
           );
         }
         const body = (await request.json()) as { apiKey?: string };
-        const apiKey = String(body.apiKey || '').trim();
+        const rawInput = String(body.apiKey || '').trim();
+        const apiKey = rawInput ? sanitizeGeminiApiKey(rawInput) || rawInput : '';
         memoryUserKeys.set(userId, apiKey);
 
         if (env.DB) {
@@ -703,21 +754,16 @@ export default {
           textPrompt?: string;
         };
 
-        const apiKey = await resolveApiKey(env, request, userId);
-        if (!apiKey) {
+        const candidateKeys = await getCandidateApiKeys(env, request, userId);
+        if (candidateKeys.length === 0) {
           return Response.json(
             {
               error:
-                'Hesabınıza tanımlı bir Gemini API anahtarı bulunamadı. Lütfen üstteki API Anahtarı alanından kendi ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
+                "Tanımlı bir Gemini API anahtarı bulunamadı. Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı seçin veya üstteki API Anahtarı alanından ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.",
             },
             { status: 400, headers: corsHeaders }
           );
         }
-
-        const ai = new GoogleGenAI({
-          apiKey,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        });
 
         const parts: Record<string, unknown>[] = [];
         for (const f of body.files || []) {
@@ -733,41 +779,67 @@ export default {
           text: `Mevcut kullanıcı etiket havuzu: ${(body.existingTags || []).join(', ')}. Bugünün tarihi: ${today}. ${body.textPrompt || 'Belgedeki tüm harcamaları kurallara göre çıkar.'}`,
         });
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: { parts },
-          config: {
-            systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                detectedBank: { type: Type.STRING },
-                summaryNote: { type: Type.STRING },
-                expenses: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      title: { type: Type.STRING },
-                      amount: { type: Type.NUMBER },
-                      currency: { type: Type.STRING },
-                      amountInTRY: { type: Type.NUMBER },
-                      category: { type: Type.STRING, enum: FIXED_CATEGORIES },
-                      tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      date: { type: Type.STRING },
-                      notes: { type: Type.STRING },
+        let responseText = '';
+        let lastError: unknown = null;
+
+        for (const apiKey of candidateKeys) {
+          try {
+            const ai = new GoogleGenAI({
+              apiKey,
+              httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+            });
+
+            const response = await ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: { parts },
+              config: {
+                systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    detectedBank: { type: Type.STRING },
+                    summaryNote: { type: Type.STRING },
+                    expenses: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          title: { type: Type.STRING },
+                          amount: { type: Type.NUMBER },
+                          currency: { type: Type.STRING },
+                          amountInTRY: { type: Type.NUMBER },
+                          category: { type: Type.STRING, enum: FIXED_CATEGORIES },
+                          tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                          date: { type: Type.STRING },
+                          notes: { type: Type.STRING },
+                        },
+                        required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
+                      },
                     },
-                    required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
                   },
+                  required: ['expenses'],
                 },
               },
-              required: ['expenses'],
-            },
-          },
-        });
+            });
 
-        const parsed = JSON.parse((response.text || '{}').trim());
+            responseText = (response.text || '{}').trim();
+            lastError = null;
+            break;
+          } catch (err) {
+            lastError = err;
+          }
+        }
+
+        if (lastError) {
+          const formatted = formatGeminiErrorMessage(lastError);
+          return Response.json(
+            { error: formatted.message },
+            { status: formatted.status, headers: corsHeaders }
+          );
+        }
+
+        const parsed = JSON.parse(responseText || '{}');
         const normalizedExpenses: ExtractedExpense[] = (parsed.expenses || []).map(
           (item: Record<string, unknown>) => ({
             title: String(item.title || 'Harcama').trim(),
@@ -816,29 +888,24 @@ export default {
         const existingExpenses = body.existingExpenses || [];
         const existingTags = body.existingTags || [];
 
-        const apiKey = await resolveApiKey(env, request, userId);
+        const candidateKeys = await getCandidateApiKeys(env, request, userId);
 
-        if (!apiKey && files.length === 0) {
+        if (candidateKeys.length === 0 && files.length === 0) {
           const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
           return Response.json(fallback, { headers: corsHeaders });
         }
 
-        if (!apiKey) {
+        if (candidateKeys.length === 0) {
           return Response.json(
             {
               error:
-                'Dosya analizi için Gemini API anahtarı gereklidir. Lütfen ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
+                "Dosya analizi için Gemini API anahtarı gereklidir. Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı seçin veya ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.",
             },
             { status: 400, headers: corsHeaders }
           );
         }
 
         try {
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-          });
-
           const parts: Record<string, unknown>[] = [];
           for (const f of files) {
             if (f?.mimeType && f?.data) {
@@ -869,48 +936,78 @@ ${JSON.stringify(compactLedger)}
 Kullanıcı mesajı: "${message}"`,
           });
 
-          const response = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: { parts },
-            config: {
-              systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  reply: { type: Type.STRING },
-                  proposedExpenses: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        title: { type: Type.STRING },
-                        amount: { type: Type.NUMBER },
-                        currency: { type: Type.STRING },
-                        amountInTRY: { type: Type.NUMBER },
-                        category: { type: Type.STRING, enum: FIXED_CATEGORIES },
-                        tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                        date: { type: Type.STRING },
-                        notes: { type: Type.STRING },
-                      },
-                      required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                    },
-                  },
-                  analysisHighlight: {
+          let responseText = '';
+          let lastError: unknown = null;
+
+          for (const apiKey of candidateKeys) {
+            try {
+              const ai = new GoogleGenAI({
+                apiKey,
+                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+              });
+
+              const response = await ai.models.generateContent({
+                model: 'gemini-3.8-flash',
+                contents: { parts },
+                config: {
+                  systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                      label: { type: Type.STRING },
-                      totalTRY: { type: Type.NUMBER },
-                      count: { type: Type.NUMBER },
+                      reply: { type: Type.STRING },
+                      proposedExpenses: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            title: { type: Type.STRING },
+                            amount: { type: Type.NUMBER },
+                            currency: { type: Type.STRING },
+                            amountInTRY: { type: Type.NUMBER },
+                            category: { type: Type.STRING, enum: FIXED_CATEGORIES },
+                            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                            date: { type: Type.STRING },
+                            notes: { type: Type.STRING },
+                          },
+                          required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
+                        },
+                      },
+                      analysisHighlight: {
+                        type: Type.OBJECT,
+                        properties: {
+                          label: { type: Type.STRING },
+                          totalTRY: { type: Type.NUMBER },
+                          count: { type: Type.NUMBER },
+                        },
+                      },
                     },
+                    required: ['reply', 'proposedExpenses'],
                   },
                 },
-                required: ['reply', 'proposedExpenses'],
-              },
-            },
-          });
+              });
 
-          const parsed = JSON.parse((response.text || '{}').trim());
+              responseText = (response.text || '{}').trim();
+              lastError = null;
+              break;
+            } catch (err) {
+              lastError = err;
+            }
+          }
+
+          if (lastError) {
+            if (files.length === 0) {
+              const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
+              return Response.json(fallback, { headers: corsHeaders });
+            }
+            const formatted = formatGeminiErrorMessage(lastError);
+            return Response.json(
+              { error: formatted.message },
+              { status: formatted.status, headers: corsHeaders }
+            );
+          }
+
+          const parsed = JSON.parse(responseText || '{}');
           const normalizedExpenses: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
             (item: Record<string, unknown>) => ({
               title: String(item.title || 'Harcama').trim(),
@@ -939,15 +1036,21 @@ Kullanıcı mesajı: "${message}"`,
             const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
             return Response.json(fallback, { headers: corsHeaders });
           }
-          const msg = err instanceof Error ? err.message : 'Asistan yanıt veremedi.';
-          return Response.json({ error: msg }, { status: 500, headers: corsHeaders });
+          const formatted = formatGeminiErrorMessage(err);
+          return Response.json(
+            { error: formatted.message },
+            { status: formatted.status, headers: corsHeaders }
+          );
         }
       }
 
       return Response.json({ error: 'Not Found' }, { status: 404, headers: corsHeaders });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Sunucu hatası';
-      return Response.json({ error: message }, { status: 500, headers: corsHeaders });
+      const formatted = formatGeminiErrorMessage(err);
+      return Response.json(
+        { error: formatted.message },
+        { status: formatted.status, headers: corsHeaders }
+      );
     }
   },
 };
