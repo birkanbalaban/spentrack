@@ -297,6 +297,7 @@ export default function App() {
   // Giriş yapılan kullanıcının hesabına tanımlı Gemini API anahtarını sunucudan çek
   const fetchAccountApiKey = useCallback(
     async (activeUserId: string, token: string) => {
+      const userScopedStorageKey = `spentrack_account_key_${activeUserId}`;
       try {
         const res = await fetch('/api/user/apikey', {
           headers: buildAuthHeaders(activeUserId, token),
@@ -307,6 +308,7 @@ export default function App() {
           if (serverKey) {
             setCustomApiKey(serverKey);
             try {
+              localStorage.setItem(userScopedStorageKey, serverKey);
               localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
             } catch {
               // ignore
@@ -314,11 +316,14 @@ export default function App() {
             return;
           }
         }
-        // Eski tarayıcı anahtarı varsa tek seferlik hesaba taşı ve tarayıcıdan sil
+        // Sunucuda anahtar henüz yoksa kullanıcıya özel yedekten veya eski anahtardan otomatik geri yükle
         try {
-          const legacyKey = localStorage.getItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
-          if (legacyKey && legacyKey.trim().length > 10) {
-            const migrated = legacyKey.trim();
+          const backupKey =
+            localStorage.getItem(userScopedStorageKey) ||
+            localStorage.getItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+          if (backupKey && backupKey.trim().length > 10) {
+            const migrated = backupKey.trim();
+            setCustomApiKey(migrated);
             await fetch('/api/user/apikey', {
               method: 'PUT',
               headers: {
@@ -327,14 +332,21 @@ export default function App() {
               },
               body: JSON.stringify({ apiKey: migrated }),
             });
-            setCustomApiKey(migrated);
+            localStorage.setItem(userScopedStorageKey, migrated);
             localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
           }
         } catch {
           // ignore
         }
       } catch {
-        // ignore
+        try {
+          const fallback = localStorage.getItem(userScopedStorageKey);
+          if (fallback && fallback.trim()) {
+            setCustomApiKey(fallback.trim());
+          }
+        } catch {
+          // ignore
+        }
       }
     },
     [buildAuthHeaders]
@@ -344,9 +356,22 @@ export default function App() {
   const handleSaveAccountApiKey = useCallback(
     async (newKey: string): Promise<void> => {
       const trimmed = newKey.trim();
+      setCustomApiKey(trimmed);
+
       if (!authUser || isDemoMode) {
-        setCustomApiKey(trimmed);
         return;
+      }
+
+      const userScopedStorageKey = `spentrack_account_key_${authUser.id}`;
+      try {
+        if (trimmed) {
+          localStorage.setItem(userScopedStorageKey, trimmed);
+        } else {
+          localStorage.removeItem(userScopedStorageKey);
+        }
+        localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+      } catch {
+        // ignore
       }
 
       const res = await fetch('/api/user/apikey', {
@@ -361,13 +386,6 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || 'API anahtarı hesaba kaydedilemedi.');
-      }
-
-      setCustomApiKey(trimmed);
-      try {
-        localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
-      } catch {
-        // ignore
       }
     },
     [authUser, authToken, isDemoMode, buildAuthHeaders]
@@ -802,33 +820,33 @@ export default function App() {
       {/* Ana İçerik Konteyneri */}
       <main className="max-w-7xl mx-auto px-4 sm:px-8 pt-4 space-y-4">
         {/* SubTrack Stili Hızlı Aksiyon, Döviz Kuru ve Aktif Profil Çubuğu */}
-        <div className="bg-[#111114] border border-[#222226] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2.5">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl px-3.5 py-2 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 min-w-0">
             <button
               type="button"
               onClick={() => setIsScannerOpen(true)}
-              className="px-3.5 py-2 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#0ea5e9] transition-colors flex items-center gap-2 cursor-pointer"
+              className="h-9 px-3 text-xs sm:text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#0ea5e9] transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4 text-[#0ea5e9] shrink-0" />
-              <span className="sm:hidden">Fiş / PDF Ekstre Yükle</span>
-              <span className="hidden sm:inline">
-                Fiş / Ekran Görüntüsü / PDF Ekstre Yükle (Ctrl+V)
+              <span>Fiş / PDF Ekstre Yükle</span>
+              <span className="hidden xl:inline-block text-[11px] font-mono text-[#a1a1aa] bg-[#222228] px-1.5 py-0.5 rounded border border-[#2e2e36]">
+                Ctrl+V
               </span>
             </button>
 
             <button
               type="button"
               onClick={() => setIsAssistantOpen(true)}
-              className="px-3.5 py-2 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#8b5cf6] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+              className="h-9 px-3 text-xs sm:text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#8b5cf6] transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Sparkles className="w-4 h-4 text-[#8b5cf6]" />
+              <Sparkles className="w-4 h-4 text-[#8b5cf6] shrink-0" />
               <span>SpenTrack Gemini Asistanı</span>
             </button>
 
             <button
               type="button"
               onClick={() => setShowApiKeyBar((v) => !v)}
-              className={`px-3 py-2 text-sm font-medium rounded-xl border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+              className={`h-9 px-3 text-xs sm:text-sm font-medium rounded-xl border transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
                 showApiKeyBar || customApiKey
                   ? 'bg-[#10b981]/10 border-[#10b981]/40 text-[#10b981]'
                   : 'bg-[#18181c] border-[#27272a] text-[#a1a1aa] hover:text-[#f4f4f5] hover:border-[#3f3f46]'
@@ -840,11 +858,11 @@ export default function App() {
           </div>
 
           {/* Sağ: SubTrack Stili Döviz Seçici (₺ $ € £), Yedekleme ve Aktif Profil */}
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 shrink-0">
             <div
               role="group"
               aria-label="Para Birimi Seçici"
-              className="flex items-center gap-1 p-1 bg-[#18181c] border border-[#27272a] rounded-xl"
+              className="h-9 flex items-center gap-0.5 p-1 bg-[#18181c] border border-[#27272a] rounded-xl shrink-0"
             >
               {(['TRY', 'USD', 'EUR', 'GBP'] as CurrencyCode[]).map((curr) => (
                 <button
@@ -852,7 +870,7 @@ export default function App() {
                   type="button"
                   title={curr}
                   onClick={() => setDisplayCurrency(curr)}
-                  className={`px-3 py-1.5 text-sm font-mono font-semibold rounded-lg transition-colors cursor-pointer ${
+                  className={`h-7 px-2.5 text-xs font-mono font-semibold rounded-lg transition-colors flex items-center justify-center whitespace-nowrap cursor-pointer ${
                     displayCurrency === curr
                       ? 'bg-[#27272e] text-white'
                       : 'text-[#a1a1aa] hover:text-[#f4f4f5]'
@@ -868,7 +886,7 @@ export default function App() {
               onClick={() => setIsSyncModalOpen(true)}
               aria-label="Hesap ve Veri Yedekleme"
               title="Hesap ve Veri Yedekleme"
-              className="min-h-[42px] min-w-[42px] flex items-center justify-center bg-[#18181c] border border-[#27272a] hover:border-[#3f3f46] rounded-xl text-[#a1a1aa] hover:text-[#f4f4f5] transition-colors cursor-pointer"
+              className="h-9 w-9 flex items-center justify-center bg-[#18181c] border border-[#27272a] hover:border-[#3f3f46] rounded-xl text-[#a1a1aa] hover:text-[#f4f4f5] transition-colors shrink-0 cursor-pointer"
             >
               <Download className="w-4 h-4" />
             </button>
@@ -878,23 +896,25 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsSyncModalOpen(true)}
-                className="px-3.5 py-1.5 bg-[#18181c] border border-[#27272a] hover:border-[#3f3f46] rounded-xl flex items-center gap-2.5 text-left transition-colors cursor-pointer"
+                className="h-9 px-3 bg-[#18181c] border border-[#27272a] hover:border-[#3f3f46] rounded-xl flex items-center gap-2 text-left transition-colors shrink-0 cursor-pointer"
               >
                 {authUser.picture ? (
                   <img
                     src={authUser.picture}
                     alt={authUser.name}
-                    className="w-7 h-7 rounded-full border border-[#10b981]"
+                    className="w-6 h-6 rounded-full border border-[#10b981] shrink-0"
                     referrerPolicy="no-referrer"
                   />
                 ) : (
-                  <div className="w-7 h-7 rounded-full bg-[#27272e] flex items-center justify-center text-xs font-bold text-[#f4f4f5]">
+                  <div className="w-6 h-6 rounded-full bg-[#27272e] flex items-center justify-center text-xs font-bold text-[#f4f4f5] shrink-0">
                     <User className="w-3.5 h-3.5 text-[#10b981]" />
                   </div>
                 )}
-                <div className="leading-tight pr-1">
-                  <div className="text-xs font-bold text-[#f4f4f5]">{authUser.name}</div>
-                  <div className="text-[11px] font-medium text-[#10b981]">Aktif</div>
+                <div className="leading-none pr-0.5">
+                  <div className="text-xs font-bold text-[#f4f4f5] whitespace-nowrap">
+                    {authUser.name}
+                  </div>
+                  <div className="text-[10px] font-medium text-[#10b981] mt-0.5">Aktif</div>
                 </div>
               </button>
             ) : (
@@ -905,7 +925,7 @@ export default function App() {
                     setIsSyncModalOpen(true);
                   });
                 }}
-                className="px-4 py-2 bg-[#f4f4f5] hover:bg-white text-[#09090b] font-semibold text-sm rounded-xl flex items-center gap-2.5 transition-colors cursor-pointer shadow-sm"
+                className="h-9 px-3.5 bg-[#f4f4f5] hover:bg-white text-[#09090b] font-semibold text-xs sm:text-sm rounded-xl flex items-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
               >
                 <svg className="w-4 h-4 shrink-0" viewBox="0 0 48 48">
                   <path

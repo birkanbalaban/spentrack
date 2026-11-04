@@ -122,7 +122,8 @@ async function getCandidateApiKeys(
     }
   };
 
-  pushUnique(request.headers.get('x-custom-gemini-key'));
+  const cleanedHeaderKey = sanitizeGeminiApiKey(request.headers.get('x-custom-gemini-key'));
+  pushUnique(cleanedHeaderKey);
 
   if (userId && userId !== 'default_user') {
     if (env.DB) {
@@ -131,11 +132,37 @@ async function getCandidateApiKeys(
           .bind(userId)
           .first<{ gemini_api_key?: string }>();
         pushUnique(row?.gemini_api_key);
+
+        if (cleanedHeaderKey && !row?.gemini_api_key) {
+          await env.DB.prepare(
+            `INSERT INTO users (id, email, name, gemini_api_key, updated_at)
+             VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+               gemini_api_key = excluded.gemini_api_key,
+               updated_at = datetime('now')`
+          )
+            .bind(userId, cleanedHeaderKey)
+            .run();
+        }
       } catch {
         // ignore
       }
     }
     pushUnique(memoryUserKeys.get(userId));
+    if (cleanedHeaderKey && !memoryUserKeys.get(userId)) {
+      memoryUserKeys.set(userId, cleanedHeaderKey);
+    }
+  }
+
+  if (env.DB) {
+    try {
+      const anyRow = await env.DB.prepare(
+        "SELECT gemini_api_key FROM users WHERE gemini_api_key IS NOT NULL AND length(gemini_api_key) > 10 ORDER BY updated_at DESC LIMIT 1"
+      ).first<{ gemini_api_key?: string }>();
+      pushUnique(anyRow?.gemini_api_key);
+    } catch {
+      // ignore
+    }
   }
 
   pushUnique(env.GEMINI_API_KEY);
@@ -146,19 +173,84 @@ async function getCandidateApiKeys(
 
 function formatGeminiErrorMessage(err: unknown): { status: number; message: string } {
   const raw = err instanceof Error ? err.message : String(err || 'Belge analiz edilirken hata oluştu.');
-  if (
-    raw.includes('API_KEY_INVALID') ||
-    raw.includes('API key not valid') ||
-    raw.includes('INVALID_ARGUMENT') ||
-    raw.includes('PERMISSION_DENIED')
-  ) {
+  if (raw.includes('API_KEY_INVALID') || raw.includes('API key not valid')) {
     return {
       status: 400,
       message:
-        "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı kontrol edin veya üstteki API Anahtarı kutusuna 'AIza...' ile başlayan geçerli bir Google AI Studio API anahtarı girip Kaydet'e basın.",
+        "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden yeni bir 'AIza...' anahtarı oluşturup eksiksiz kopyaladığınızdan emin olun.",
     };
   }
   return { status: 500, message: raw };
+}
+
+async function generateGeminiContentWithFallback(
+  candidateKeys: string[],
+  params: {
+    parts: Record<string, unknown>[];
+    systemInstruction: string;
+    responseSchema: Record<string, unknown>;
+  }
+): Promise<string> {
+  let lastError: unknown = null;
+
+  for (const apiKey of candidateKeys) {
+    const isExternalAizaKey = apiKey.startsWith('AIza');
+
+    const clientConfigs = isExternalAizaKey
+      ? [
+          {
+            httpOptions: undefined,
+            models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'],
+          },
+          {
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+            models: ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'],
+          },
+        ]
+      : [
+          {
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+            models: ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'],
+          },
+          {
+            httpOptions: undefined,
+            models: ['gemini-2.5-flash', 'gemini-flash-latest'],
+          },
+        ];
+
+    for (const cfg of clientConfigs) {
+      const ai = new GoogleGenAI(
+        cfg.httpOptions ? { apiKey, httpOptions: cfg.httpOptions } : { apiKey }
+      );
+
+      for (const modelName of cfg.models) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: { parts: params.parts },
+            config: {
+              systemInstruction: params.systemInstruction,
+              responseMimeType: 'application/json',
+              responseSchema: params.responseSchema,
+            },
+          });
+
+          const text = (response.text || '{}').trim();
+          if (text) {
+            return text;
+          }
+        } catch (err) {
+          lastError = err;
+          const msg = err instanceof Error ? err.message : String(err || '');
+          if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('Gemini API yanıt vermedi.');
 }
 
 function fallbackNaturalLanguageAssist(
@@ -780,58 +872,37 @@ export default {
         });
 
         let responseText = '';
-        let lastError: unknown = null;
-
-        for (const apiKey of candidateKeys) {
-          try {
-            const ai = new GoogleGenAI({
-              apiKey,
-              httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-            });
-
-            const response = await ai.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: { parts },
-              config: {
-                systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    detectedBank: { type: Type.STRING },
-                    summaryNote: { type: Type.STRING },
-                    expenses: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          title: { type: Type.STRING },
-                          amount: { type: Type.NUMBER },
-                          currency: { type: Type.STRING },
-                          amountInTRY: { type: Type.NUMBER },
-                          category: { type: Type.STRING, enum: FIXED_CATEGORIES },
-                          tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                          date: { type: Type.STRING },
-                          notes: { type: Type.STRING },
-                        },
-                        required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                      },
+        try {
+          responseText = await generateGeminiContentWithFallback(candidateKeys, {
+            parts,
+            systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                detectedBank: { type: Type.STRING },
+                summaryNote: { type: Type.STRING },
+                expenses: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      title: { type: Type.STRING },
+                      amount: { type: Type.NUMBER },
+                      currency: { type: Type.STRING },
+                      amountInTRY: { type: Type.NUMBER },
+                      category: { type: Type.STRING, enum: FIXED_CATEGORIES },
+                      tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      date: { type: Type.STRING },
+                      notes: { type: Type.STRING },
                     },
+                    required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
                   },
-                  required: ['expenses'],
                 },
               },
-            });
-
-            responseText = (response.text || '{}').trim();
-            lastError = null;
-            break;
-          } catch (err) {
-            lastError = err;
-          }
-        }
-
-        if (lastError) {
+              required: ['expenses'],
+            },
+          });
+        } catch (lastError) {
           const formatted = formatGeminiErrorMessage(lastError);
           return Response.json(
             { error: formatted.message },
@@ -937,65 +1008,44 @@ Kullanıcı mesajı: "${message}"`,
           });
 
           let responseText = '';
-          let lastError: unknown = null;
-
-          for (const apiKey of candidateKeys) {
-            try {
-              const ai = new GoogleGenAI({
-                apiKey,
-                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-              });
-
-              const response = await ai.models.generateContent({
-                model: 'gemini-3.8-flash',
-                contents: { parts },
-                config: {
-                  systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
-                  responseMimeType: 'application/json',
-                  responseSchema: {
+          try {
+            responseText = await generateGeminiContentWithFallback(candidateKeys, {
+              parts,
+              systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  reply: { type: Type.STRING },
+                  proposedExpenses: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        amount: { type: Type.NUMBER },
+                        currency: { type: Type.STRING },
+                        amountInTRY: { type: Type.NUMBER },
+                        category: { type: Type.STRING, enum: FIXED_CATEGORIES },
+                        tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        date: { type: Type.STRING },
+                        notes: { type: Type.STRING },
+                      },
+                      required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
+                    },
+                  },
+                  analysisHighlight: {
                     type: Type.OBJECT,
                     properties: {
-                      reply: { type: Type.STRING },
-                      proposedExpenses: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            title: { type: Type.STRING },
-                            amount: { type: Type.NUMBER },
-                            currency: { type: Type.STRING },
-                            amountInTRY: { type: Type.NUMBER },
-                            category: { type: Type.STRING, enum: FIXED_CATEGORIES },
-                            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                            date: { type: Type.STRING },
-                            notes: { type: Type.STRING },
-                          },
-                          required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                        },
-                      },
-                      analysisHighlight: {
-                        type: Type.OBJECT,
-                        properties: {
-                          label: { type: Type.STRING },
-                          totalTRY: { type: Type.NUMBER },
-                          count: { type: Type.NUMBER },
-                        },
-                      },
+                      label: { type: Type.STRING },
+                      totalTRY: { type: Type.NUMBER },
+                      count: { type: Type.NUMBER },
                     },
-                    required: ['reply', 'proposedExpenses'],
                   },
                 },
-              });
-
-              responseText = (response.text || '{}').trim();
-              lastError = null;
-              break;
-            } catch (err) {
-              lastError = err;
-            }
-          }
-
-          if (lastError) {
+                required: ['reply', 'proposedExpenses'],
+              },
+            });
+          } catch (lastError) {
             if (files.length === 0) {
               const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
               return Response.json(fallback, { headers: corsHeaders });

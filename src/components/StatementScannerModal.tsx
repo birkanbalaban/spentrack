@@ -23,6 +23,7 @@ import {
 } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
 import { AccountApiKeyBox, sanitizeClientApiKey } from './AccountApiKeyBox';
+import { extractStatementDirectClient } from '../utils/clientGeminiFallback';
 
 interface StatementScannerModalProps {
   isOpen: boolean;
@@ -110,8 +111,14 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
 
     setAnalyzing(true);
     setError('');
+    const activeKey = sanitizeClientApiKey(liveDraftKey || customApiKey);
+    const payloadFiles = attachments.map((a) => ({
+      name: a.name,
+      mimeType: a.mimeType,
+      data: a.data,
+    }));
+
     try {
-      const activeKey = sanitizeClientApiKey(liveDraftKey || customApiKey);
       if (activeKey && activeKey !== customApiKey && activeKey.startsWith('AIza')) {
         onSaveApiKey(activeKey).catch(() => {});
       }
@@ -124,28 +131,45 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         headers['x-custom-gemini-key'] = activeKey;
       }
 
-      const res = await fetch('/api/ai/extract', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          files: attachments.map((a) => ({
-            name: a.name,
-            mimeType: a.mimeType,
-            data: a.data,
-          })),
-          existingTags,
-        }),
-      });
+      let extractedData: {
+        detectedBank?: string;
+        summaryNote?: string;
+        expenses?: ExtractedExpense[];
+      } | null = null;
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Ekstre analiz edilemedi.');
+      try {
+        const res = await fetch('/api/ai/extract', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            files: payloadFiles,
+            existingTags,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Ekstre analiz edilemedi.');
+        }
+        extractedData = data;
+      } catch (serverErr) {
+        if (activeKey && activeKey.startsWith('AIza')) {
+          extractedData = await extractStatementDirectClient({
+            apiKey: activeKey,
+            files: payloadFiles,
+            existingTags,
+          });
+        } else {
+          throw serverErr;
+        }
       }
 
-      const rawExpenses: ExtractedExpense[] = data.expenses || [];
+      const rawExpenses: ExtractedExpense[] = extractedData?.expenses || [];
       const marked = detectDuplicates(rawExpenses, existingExpenses);
-      setDetectedBank(data.detectedBank || '');
-      setSummaryNote(data.summaryNote || `${marked.length} harcama satırı ayrıştırıldı.`);
+      setDetectedBank(extractedData?.detectedBank || '');
+      setSummaryNote(
+        extractedData?.summaryNote || `${marked.length} harcama satırı ayrıştırıldı.`
+      );
       setCandidates(marked);
     } catch (err) {
       const rawMsg = err instanceof Error ? err.message : 'Analiz sırasında bir hata oluştu.';

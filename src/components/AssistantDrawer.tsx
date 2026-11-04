@@ -18,7 +18,8 @@ import {
 } from '../types';
 import { detectDuplicates, formatCurrency } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
-import { AccountApiKeyBox } from './AccountApiKeyBox';
+import { AccountApiKeyBox, sanitizeClientApiKey } from './AccountApiKeyBox';
+import { chatWithAssistantDirectClient } from '../utils/clientGeminiFallback';
 
 interface AssistantDrawerProps {
   isOpen: boolean;
@@ -60,6 +61,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [loading, setLoading] = useState(false);
   const [showKeyConfig, setShowKeyConfig] = useState(false);
+  const [liveDraftKey, setLiveDraftKey] = useState<string>(customApiKey || '');
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   if (!isOpen) return null;
@@ -94,46 +96,74 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     setAttachments([]);
     setLoading(true);
 
+    const activeKey = sanitizeClientApiKey(liveDraftKey || customApiKey);
+    const payloadFiles = currentAttachments.map((a) => ({
+      name: a.name,
+      mimeType: a.mimeType,
+      data: a.data,
+    }));
+
     try {
+      if (activeKey && activeKey !== customApiKey && activeKey.startsWith('AIza')) {
+        onSaveApiKey(activeKey).catch(() => {});
+      }
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...authHeaders,
       };
-      if (customApiKey) {
-        headers['x-custom-gemini-key'] = customApiKey;
+      if (activeKey) {
+        headers['x-custom-gemini-key'] = activeKey;
       }
 
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          message: text,
-          files: currentAttachments.map((a) => ({
-            name: a.name,
-            mimeType: a.mimeType,
-            data: a.data,
-          })),
-          existingExpenses: expenses,
-          existingTags,
-        }),
-      });
+      let chatData: {
+        reply?: string;
+        analysisHighlight?: string;
+        proposedExpenses?: ExtractedExpense[];
+      } | null = null;
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Asistan yanıt veremedi.');
+      try {
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            message: text,
+            files: payloadFiles,
+            existingExpenses: expenses,
+            existingTags,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Asistan yanıt veremedi.');
+        }
+        chatData = data;
+      } catch (serverErr) {
+        if (activeKey && activeKey.startsWith('AIza')) {
+          chatData = await chatWithAssistantDirectClient({
+            apiKey: activeKey,
+            message: text,
+            files: payloadFiles,
+            existingExpenses: expenses,
+            existingTags,
+          });
+        } else {
+          throw serverErr;
+        }
       }
 
-      const rawProposed: ExtractedExpense[] = data.proposedExpenses || [];
+      const rawProposed: ExtractedExpense[] = chatData?.proposedExpenses || [];
       const markedProposed: MarkedCandidate[] =
         rawProposed.length > 0 ? detectDuplicates(rawProposed, expenses) : [];
 
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
-        content: data.reply || 'İşleminiz tamamlandı.',
+        content: chatData?.reply || 'İşleminiz tamamlandı.',
         timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
         proposedExpenses: markedProposed.length > 0 ? markedProposed : undefined,
-        analysisHighlight: data.analysisHighlight,
+        analysisHighlight: chatData?.analysisHighlight,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -238,6 +268,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             savedApiKey={customApiKey}
             isAuthenticated={isAuthenticated}
             onSaveApiKey={onSaveApiKey}
+            onDraftKeyChange={setLiveDraftKey}
             compact
           />
         )}
