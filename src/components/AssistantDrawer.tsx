@@ -5,7 +5,6 @@ import {
   Paperclip,
   Check,
   AlertTriangle,
-  ExternalLink,
   KeyRound,
   Loader2,
 } from 'lucide-react';
@@ -19,6 +18,7 @@ import {
 } from '../types';
 import { detectDuplicates, formatCurrency } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
+import { AccountApiKeyBox } from './AccountApiKeyBox';
 
 interface AssistantDrawerProps {
   isOpen: boolean;
@@ -27,7 +27,9 @@ interface AssistantDrawerProps {
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
   customApiKey: string;
-  onChangeCustomApiKey: (key: string) => void;
+  isAuthenticated?: boolean;
+  authHeaders?: Record<string, string>;
+  onSaveApiKey: (key: string) => Promise<void>;
   onClose: () => void;
   onBatchSave: (items: ExtractedExpense[]) => Promise<void>;
 }
@@ -39,7 +41,9 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   displayCurrency,
   rates,
   customApiKey,
-  onChangeCustomApiKey,
+  isAuthenticated = false,
+  authHeaders = {},
+  onSaveApiKey,
   onClose,
   onBatchSave,
 }) => {
@@ -91,7 +95,10 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     setLoading(true);
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      };
       if (customApiKey) {
         headers['x-custom-gemini-key'] = customApiKey;
       }
@@ -225,43 +232,14 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           </div>
         </div>
 
-        {/* Opsiyonel Kendi Gemini API Anahtarın Bölümü */}
+        {/* Hesaba Tanımlı Gemini API Anahtarı Bölümü */}
         {showKeyConfig && (
-          <div className="px-5 py-3.5 bg-[#121215] border-b border-[#27272a] space-y-2 text-xs">
-            <div className="font-medium text-[#f4f4f5]">
-              Kendi Gemini API Anahtarın (Opsiyonel — localStorage)
-            </div>
-            <p className="text-[#a1a1aa] leading-relaxed">
-              Sunucu anahtarına bağlı kalmadan kendi ücretsiz Gemini API anahtarınızı kullanabilirsiniz. Google AI Studio üzerinden saniyeler içinde ücretsiz anahtar oluşturabilirsiniz:
-            </p>
-            <a
-              href="https://aistudio.google.com/apikey"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-[#10b981] hover:underline font-mono"
-            >
-              <span>https://aistudio.google.com/apikey</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-            <div className="pt-1 flex gap-2">
-              <input
-                type="password"
-                value={customApiKey}
-                onChange={(e) => onChangeCustomApiKey(e.target.value)}
-                placeholder="AIzaSy... (Yalnızca tarayıcınızda saklanır)"
-                className="flex-1 px-3 py-1.5 bg-[#09090b] border border-[#27272a] rounded-lg text-xs font-mono text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
-              />
-              {customApiKey && (
-                <button
-                  type="button"
-                  onClick={() => onChangeCustomApiKey('')}
-                  className="px-2.5 py-1.5 text-xs text-[#f43f5e] border border-[#27272a] rounded-lg hover:bg-[#f43f5e]/10 cursor-pointer"
-                >
-                  Temizle
-                </button>
-              )}
-            </div>
-          </div>
+          <AccountApiKeyBox
+            savedApiKey={customApiKey}
+            isAuthenticated={isAuthenticated}
+            onSaveApiKey={onSaveApiKey}
+            compact
+          />
         )}
 
         {/* Hızlı Örnek Komutlar */}

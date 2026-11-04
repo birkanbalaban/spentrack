@@ -80,7 +80,27 @@ Kullanıcı sana iki tür istekte bulunabilir:
    - Rakamları kuruşuna kadar doğru topla, iadeleri düş ve çok net, okunaklı bir Türkçe yanıt ("reply") üret.
    - Eğer bir soru/analiz yanıtlıyorsan ve yeni harcama eklenmiyorsa "proposedExpenses" dizisini boş ([]) bırak ve "analysisHighlight" alanını doldur.`;
 
-function resolveApiKey(env: Env, request: Request): string | null {
+const memoryUserKeys = new Map<string, string>();
+
+async function resolveApiKey(env: Env, request: Request, userId: string): Promise<string | null> {
+  if (userId && userId !== 'default_user') {
+    if (env.DB) {
+      try {
+        const row = await env.DB.prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+          .bind(userId)
+          .first<{ gemini_api_key?: string }>();
+        if (row?.gemini_api_key && row.gemini_api_key.trim().length > 10) {
+          return row.gemini_api_key.trim();
+        }
+      } catch {
+        // ignore
+      }
+    }
+    const memKey = memoryUserKeys.get(userId);
+    if (memKey && memKey.trim().length > 10) {
+      return memKey.trim();
+    }
+  }
   const customKey = request.headers.get('x-custom-gemini-key');
   if (customKey && customKey.trim().length > 10) {
     return customKey.trim();
@@ -327,6 +347,7 @@ async function ensureSchema(db?: D1Database): Promise<void> {
           email TEXT NOT NULL,
           name TEXT NOT NULL,
           avatar_url TEXT DEFAULT '',
+          gemini_api_key TEXT DEFAULT '',
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )`
@@ -347,6 +368,11 @@ async function ensureSchema(db?: D1Database): Promise<void> {
         )`
       ),
     ]);
+    try {
+      await db.prepare("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''").run();
+    } catch {
+      // Column already exists
+    }
     schemaInitialized = true;
   } catch {
     // ignore
@@ -395,6 +421,7 @@ export default {
           );
         }
 
+        let savedKey = memoryUserKeys.get(id) || '';
         if (env.DB) {
           await env.DB.prepare(
             `INSERT INTO users (id, email, name, avatar_url, updated_at)
@@ -407,6 +434,17 @@ export default {
           )
             .bind(id, email, name, avatarUrl)
             .run();
+
+          try {
+            const row = await env.DB.prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+              .bind(id)
+              .first<{ gemini_api_key?: string }>();
+            if (row?.gemini_api_key) {
+              savedKey = String(row.gemini_api_key).trim();
+            }
+          } catch {
+            // ignore
+          }
         }
 
         const token = await signJwtWebCrypto(
@@ -422,7 +460,69 @@ export default {
               email,
               name,
               avatarUrl: avatarUrl || undefined,
+              geminiApiKey: savedKey,
             },
+          },
+          { headers: corsHeaders }
+        );
+      }
+
+      // GET /api/user/apikey
+      if (url.pathname === '/api/user/apikey' && request.method === 'GET') {
+        if (!userId || userId === 'default_user') {
+          return Response.json({ apiKey: '', hasKey: false }, { headers: corsHeaders });
+        }
+        let apiKey = memoryUserKeys.get(userId) || '';
+        if (env.DB) {
+          try {
+            const row = await env.DB.prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+              .bind(userId)
+              .first<{ gemini_api_key?: string }>();
+            if (row && typeof row.gemini_api_key === 'string') {
+              apiKey = row.gemini_api_key.trim();
+            }
+          } catch {
+            // ignore
+          }
+        }
+        return Response.json(
+          {
+            apiKey,
+            hasKey: apiKey.length > 10,
+          },
+          { headers: corsHeaders }
+        );
+      }
+
+      // PUT /api/user/apikey
+      if (url.pathname === '/api/user/apikey' && request.method === 'PUT') {
+        if (!userId || userId === 'default_user') {
+          return Response.json(
+            { error: 'API anahtarını hesaba tanımlamak için lütfen önce Google ile giriş yapın.' },
+            { status: 401, headers: corsHeaders }
+          );
+        }
+        const body = (await request.json()) as { apiKey?: string };
+        const apiKey = String(body.apiKey || '').trim();
+        memoryUserKeys.set(userId, apiKey);
+
+        if (env.DB) {
+          await env.DB.prepare(
+            `INSERT INTO users (id, email, name, gemini_api_key, updated_at)
+             VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+               gemini_api_key = excluded.gemini_api_key,
+               updated_at = datetime('now')`
+          )
+            .bind(userId, apiKey)
+            .run();
+        }
+
+        return Response.json(
+          {
+            ok: true,
+            apiKey,
+            hasKey: apiKey.length > 10,
           },
           { headers: corsHeaders }
         );
@@ -603,12 +703,12 @@ export default {
           textPrompt?: string;
         };
 
-        const apiKey = resolveApiKey(env, request);
+        const apiKey = await resolveApiKey(env, request, userId);
         if (!apiKey) {
           return Response.json(
             {
               error:
-                'Gemini API anahtarı yapılandırılmamış. Cloudflare Workers değişkenlerine GEMINI_API_KEY ekleyin veya Asistan panelinden kendi anahtarınızı tanımlayın.',
+                'Hesabınıza tanımlı bir Gemini API anahtarı bulunamadı. Lütfen üstteki API Anahtarı alanından kendi ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
             },
             { status: 400, headers: corsHeaders }
           );
@@ -716,7 +816,7 @@ export default {
         const existingExpenses = body.existingExpenses || [];
         const existingTags = body.existingTags || [];
 
-        const apiKey = resolveApiKey(env, request);
+        const apiKey = await resolveApiKey(env, request, userId);
 
         if (!apiKey && files.length === 0) {
           const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
@@ -727,7 +827,7 @@ export default {
           return Response.json(
             {
               error:
-                'Dosya analizi için Gemini API anahtarı gereklidir. Cloudflare Workers değişkenlerine GEMINI_API_KEY ekleyebilir veya Asistan ayarlarından kendi anahtarınızı girebilirsiniz.',
+                'Dosya analizi için Gemini API anahtarı gereklidir. Lütfen ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
             },
             { status: 400, headers: corsHeaders }
           );

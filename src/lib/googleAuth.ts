@@ -3,6 +3,7 @@ export interface AuthenticatedUser {
   email: string;
   name: string;
   avatarUrl?: string;
+  geminiApiKey?: string;
 }
 
 export interface GoogleAuthResult {

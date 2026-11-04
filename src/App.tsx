@@ -12,6 +12,7 @@ import {
   User,
   Eye,
   LogOut,
+  KeyRound,
 } from 'lucide-react';
 import {
   CurrencyCode,
@@ -39,12 +40,13 @@ import { StatementScannerModal } from './components/StatementScannerModal';
 import { AssistantDrawer } from './components/AssistantDrawer';
 import { DataSyncModal } from './components/DataSyncModal';
 import { LandingAuthView } from './components/LandingAuthView';
+import { AccountApiKeyBox } from './components/AccountApiKeyBox';
 import { triggerDirectGoogleLogin } from './lib/googleAuth';
 
 const LOCAL_STORAGE_EXPENSES_KEY = 'spentrack_guest_expenses_v1';
 const LOCAL_STORAGE_AUTH_USER_KEY = 'spentrack_auth_user_v2';
 const LOCAL_STORAGE_AUTH_TOKEN_KEY = 'spentrack_auth_token_v2';
-const LOCAL_STORAGE_GEMINI_KEY = 'spentrack_custom_gemini_key_v1';
+const LEGACY_LOCAL_STORAGE_GEMINI_KEY = 'spentrack_custom_gemini_key_v1';
 
 const FALLBACK_RATES: CurrencyRates = {
   base: 'TRY',
@@ -216,24 +218,10 @@ export default function App() {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [showApiKeyBar, setShowApiKeyBar] = useState(false);
 
-  const [customApiKey, setCustomApiKey] = useState<string>(() => {
-    try {
-      return localStorage.getItem(LOCAL_STORAGE_GEMINI_KEY) || '';
-    } catch {
-      return '';
-    }
-  });
-
-  const handleUpdateCustomApiKey = (val: string) => {
-    setCustomApiKey(val);
-    try {
-      if (val) localStorage.setItem(LOCAL_STORAGE_GEMINI_KEY, val);
-      else localStorage.removeItem(LOCAL_STORAGE_GEMINI_KEY);
-    } catch {
-      // ignore
-    }
-  };
+  // Hesaba tanımlı Gemini API anahtarı (Tarayıcı localStorage yerine bulut kullanıcı hesabında tutulur)
+  const [customApiKey, setCustomApiKey] = useState<string>('');
 
   // Canlı Döviz Kuru: Frankfurter API
   useEffect(() => {
@@ -306,11 +294,91 @@ export default function App() {
     [buildAuthHeaders]
   );
 
+  // Giriş yapılan kullanıcının hesabına tanımlı Gemini API anahtarını sunucudan çek
+  const fetchAccountApiKey = useCallback(
+    async (activeUserId: string, token: string) => {
+      try {
+        const res = await fetch('/api/user/apikey', {
+          headers: buildAuthHeaders(activeUserId, token),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const serverKey = String(data.apiKey || '').trim();
+          if (serverKey) {
+            setCustomApiKey(serverKey);
+            try {
+              localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+            } catch {
+              // ignore
+            }
+            return;
+          }
+        }
+        // Eski tarayıcı anahtarı varsa tek seferlik hesaba taşı ve tarayıcıdan sil
+        try {
+          const legacyKey = localStorage.getItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+          if (legacyKey && legacyKey.trim().length > 10) {
+            const migrated = legacyKey.trim();
+            await fetch('/api/user/apikey', {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                ...buildAuthHeaders(activeUserId, token),
+              },
+              body: JSON.stringify({ apiKey: migrated }),
+            });
+            setCustomApiKey(migrated);
+            localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+          }
+        } catch {
+          // ignore
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [buildAuthHeaders]
+  );
+
+  // Manuel girilen Gemini API anahtarını doğrudan giriş yapılan hesaba kaydet / kaldır
+  const handleSaveAccountApiKey = useCallback(
+    async (newKey: string): Promise<void> => {
+      const trimmed = newKey.trim();
+      if (!authUser || isDemoMode) {
+        setCustomApiKey(trimmed);
+        return;
+      }
+
+      const res = await fetch('/api/user/apikey', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAuthHeaders(authUser.id, authToken),
+        },
+        body: JSON.stringify({ apiKey: trimmed }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'API anahtarı hesaba kaydedilemedi.');
+      }
+
+      setCustomApiKey(trimmed);
+      try {
+        localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
+      } catch {
+        // ignore
+      }
+    },
+    [authUser, authToken, isDemoMode, buildAuthHeaders]
+  );
+
   useEffect(() => {
     if (authUser && !isDemoMode) {
       fetchExpenses(authUser.id, authToken);
+      fetchAccountApiKey(authUser.id, authToken);
     }
-  }, [authUser, authToken, isDemoMode, fetchExpenses]);
+  }, [authUser, authToken, isDemoMode, fetchExpenses, fetchAccountApiKey]);
 
   // Global Ctrl+V ile ekrana fiş / ekran görüntüsü yapıştırma desteği
   useEffect(() => {
@@ -347,6 +415,9 @@ export default function App() {
           };
           setAuthToken(token);
           setAuthUser(profile);
+          if (gUser.geminiApiKey) {
+            setCustomApiKey(gUser.geminiApiKey);
+          }
           setIsDemoMode(false);
           setIsLoggingIn(false);
 
@@ -357,7 +428,10 @@ export default function App() {
             // ignore
           }
 
-          await fetchExpenses(profile.id, token);
+          await Promise.all([
+            fetchExpenses(profile.id, token),
+            fetchAccountApiKey(profile.id, token),
+          ]);
           resolve();
         },
         (errMsg) => {
@@ -373,12 +447,14 @@ export default function App() {
   const handleLogout = async () => {
     setAuthUser(null);
     setAuthToken('');
+    setCustomApiKey('');
     setIsDemoMode(false);
     setIsSyncModalOpen(false);
     setExpenses([]);
     try {
       localStorage.removeItem(LOCAL_STORAGE_AUTH_USER_KEY);
       localStorage.removeItem(LOCAL_STORAGE_AUTH_TOKEN_KEY);
+      localStorage.removeItem(LEGACY_LOCAL_STORAGE_GEMINI_KEY);
     } catch {
       // ignore
     }
@@ -748,6 +824,19 @@ export default function App() {
               <Sparkles className="w-4 h-4 text-[#8b5cf6]" />
               <span>SpenTrack Gemini Asistanı</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setShowApiKeyBar((v) => !v)}
+              className={`px-3.5 py-2.5 text-sm font-medium rounded-xl border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+                showApiKeyBar || customApiKey
+                  ? 'bg-[#10b981]/10 border-[#10b981]/40 text-[#10b981]'
+                  : 'bg-[#18181c] border-[#27272a] text-[#a1a1aa] hover:text-[#f4f4f5] hover:border-[#3f3f46]'
+              }`}
+            >
+              <KeyRound className="w-4 h-4 shrink-0" />
+              <span>{customApiKey ? 'API Anahtarı Tanımlı' : 'Gemini API Anahtarı'}</span>
+            </button>
           </div>
 
           {/* Sağ: SubTrack Stili Döviz Seçici (₺ $ € £), Yedekleme ve Aktif Profil */}
@@ -841,6 +930,15 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Hesaba Tanımlı Manuel Gemini API Anahtarı Alanı (Aksiyon barından açılır veya anahtar henüz tanımlanmamışsa gösterilir) */}
+        {(showApiKeyBar || !customApiKey) && (
+          <AccountApiKeyBox
+            savedApiKey={customApiKey}
+            isAuthenticated={Boolean(authUser && !isDemoMode)}
+            onSaveApiKey={handleSaveAccountApiKey}
+          />
+        )}
 
         {/* 4 Üst Özet Kartı + Canlı Kur Satırı */}
         <MetricsOverview
@@ -1134,6 +1232,9 @@ export default function App() {
         existingExpenses={expenses}
         existingTags={allExistingTags}
         customApiKey={customApiKey}
+        isAuthenticated={Boolean(authUser && !isDemoMode)}
+        authHeaders={authUser ? buildAuthHeaders(authUser.id, authToken) : {}}
+        onSaveApiKey={handleSaveAccountApiKey}
         onClose={() => setIsScannerOpen(false)}
         onBatchSave={handleBatchSaveExpenses}
       />
@@ -1145,7 +1246,9 @@ export default function App() {
         displayCurrency={displayCurrency}
         rates={rates}
         customApiKey={customApiKey}
-        onChangeCustomApiKey={handleUpdateCustomApiKey}
+        isAuthenticated={Boolean(authUser && !isDemoMode)}
+        authHeaders={authUser ? buildAuthHeaders(authUser.id, authToken) : {}}
+        onSaveApiKey={handleSaveAccountApiKey}
         onClose={() => setIsAssistantOpen(false)}
         onBatchSave={handleBatchSaveExpenses}
       />
@@ -1155,6 +1258,8 @@ export default function App() {
         user={activeProfile}
         expenses={expenses}
         guestPendingCount={expenses.length}
+        savedApiKey={customApiKey}
+        onSaveApiKey={handleSaveAccountApiKey}
         onClose={() => setIsSyncModalOpen(false)}
         onGoogleLogin={handleTriggerGoogleLogin}
         onGoogleLogout={handleLogout}

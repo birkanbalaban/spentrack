@@ -28,6 +28,11 @@ if (fs.existsSync(schemaPath)) {
   const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
   db.exec(schemaSql);
 }
+try {
+  db.exec("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''");
+} catch {
+  // Column already exists
+}
 
 // Seed realistic initial data for default_user if table is empty
 const existingCount = db
@@ -183,7 +188,19 @@ Kullanıcı sana iki tür istekte bulunabilir:
    - Rakamları kuruşuna kadar doğru topla, iadeleri düş ve çok net, okunaklı bir Türkçe yanıt ("reply") üret.
    - Eğer bir soru/analiz yanıtlıyorsan ve yeni harcama eklenmiyorsa "proposedExpenses" dizisini boş ([]) bırak ve "analysisHighlight" alanını doldur.`;
 
-function hasValidServerApiKey(customKey?: string): string | null {
+function resolveUserOrServerApiKey(userId: string, customKey?: string): string | null {
+  if (userId && userId !== 'default_user') {
+    try {
+      const row = db
+        .prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+        .get(userId) as { gemini_api_key?: string } | undefined;
+      if (row?.gemini_api_key && row.gemini_api_key.trim().length > 10) {
+        return row.gemini_api_key.trim();
+      }
+    } catch {
+      // ignore
+    }
+  }
   if (customKey && customKey.trim().length > 10) {
     return customKey.trim();
   }
@@ -443,6 +460,11 @@ async function startServer() {
            updated_at = datetime('now')`
       ).run(userId, userEmail, userName, userAvatar);
 
+      const userRow = db
+        .prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+        .get(userId) as { gemini_api_key?: string } | undefined;
+      const savedKey = String(userRow?.gemini_api_key || '').trim();
+
       const token = signJwt({
         sub: userId,
         email: userEmail,
@@ -456,10 +478,64 @@ async function startServer() {
           email: userEmail,
           name: userName,
           avatarUrl: userAvatar || undefined,
+          geminiApiKey: savedKey,
         },
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kimlik doğrulama hatası';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // GET /api/user/apikey — Get the logged-in user's account-bound Gemini API key
+  app.get('/api/user/apikey', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId || userId === 'default_user') {
+        res.json({ apiKey: '', hasKey: false });
+        return;
+      }
+      const row = db
+        .prepare('SELECT gemini_api_key FROM users WHERE id = ?')
+        .get(userId) as { gemini_api_key?: string } | undefined;
+      const apiKey = String(row?.gemini_api_key || '').trim();
+      res.json({
+        apiKey,
+        hasKey: apiKey.length > 10,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Anahtar bilgisi alınamadı';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // PUT /api/user/apikey — Save or remove the logged-in user's account-bound Gemini API key
+  app.put('/api/user/apikey', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId || userId === 'default_user') {
+        res.status(401).json({
+          error: 'API anahtarını hesaba tanımlamak için lütfen önce Google ile giriş yapın.',
+        });
+        return;
+      }
+      const apiKey = String(req.body?.apiKey || '').trim();
+
+      db.prepare(
+        `INSERT INTO users (id, email, name, gemini_api_key, updated_at)
+         VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           gemini_api_key = excluded.gemini_api_key,
+           updated_at = datetime('now')`
+      ).run(userId, apiKey);
+
+      res.json({
+        ok: true,
+        apiKey,
+        hasKey: apiKey.length > 10,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'API anahtarı kaydedilemedi';
       res.status(500).json({ error: msg });
     }
   });
@@ -649,14 +725,15 @@ async function startServer() {
   // POST /api/ai/extract (Fiş, Ekran Görüntüsü ve PDF Kredi Kartı Ekstresi Çıkarımı)
   app.post('/api/ai/extract', async (req, res) => {
     try {
+      const userId = getUserId(req);
       const { files = [], existingTags = [], textPrompt = '' } = req.body || {};
       const customKey = req.headers['x-custom-gemini-key'] as string | undefined;
-      const apiKey = hasValidServerApiKey(customKey);
+      const apiKey = resolveUserOrServerApiKey(userId, customKey);
 
       if (!apiKey) {
         res.status(400).json({
           error:
-            'Gemini API anahtarı yapılandırılmamış. Lütfen AI Studio Settings > Secrets panelinden GEMINI_API_KEY ekleyin veya Asistan panelinden kendi anahtarınızı tanımlayın.',
+            'Hesabınıza tanımlı bir Gemini API anahtarı bulunamadı. Lütfen üstteki API Anahtarı alanından kendi ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
         });
         return;
       }
@@ -782,8 +859,9 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
     } = req.body || {};
 
     try {
+      const userId = getUserId(req);
       const customKey = req.headers['x-custom-gemini-key'] as string | undefined;
-      const apiKey = hasValidServerApiKey(customKey);
+      const apiKey = resolveUserOrServerApiKey(userId, customKey);
 
       if (!apiKey && (!files || files.length === 0)) {
         // Fallback local deterministic assistant when no API key is set
@@ -795,7 +873,7 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
       if (!apiKey) {
         res.status(400).json({
           error:
-            'Dosya analizi için Gemini API anahtarı gereklidir. AI Studio Settings > Secrets panelinden veya Asistan ayarlarından ücretsiz anahtarınızı ekleyebilirsiniz.',
+            'Dosya analizi için Gemini API anahtarı gereklidir. Lütfen ücretsiz Gemini API anahtarınızı hesabınıza kaydedin.',
         });
         return;
       }

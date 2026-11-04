@@ -16,12 +16,15 @@ import {
   parseTurkishAmount,
 } from '../utils/expenseLogic';
 import { usePWAInstall } from '../utils/usePWAInstall';
+import { AccountApiKeyBox } from './AccountApiKeyBox';
 
 interface DataSyncModalProps {
   isOpen: boolean;
   user: UserProfile;
   expenses: Expense[];
   guestPendingCount: number;
+  savedApiKey: string;
+  onSaveApiKey: (apiKey: string) => Promise<void>;
   onClose: () => void;
   onGoogleLogin: () => Promise<void>;
   onGoogleLogout: () => Promise<void>;
@@ -34,6 +37,8 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
   isOpen,
   user,
   expenses,
+  savedApiKey,
+  onSaveApiKey,
   onClose,
   onGoogleLogin,
   onGoogleLogout,
@@ -243,7 +248,14 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
           )}
         </div>
 
-        {/* 2. JSON & CSV Dışa / İçe Aktarım */}
+        {/* 2. Hesaba Tanımlı Manuel Gemini API Anahtarı */}
+        <AccountApiKeyBox
+          savedApiKey={savedApiKey}
+          isAuthenticated={user.mode === 'google'}
+          onSaveApiKey={onSaveApiKey}
+        />
+
+        {/* 3. JSON & CSV Dışa / İçe Aktarım */}
         <div className="bg-[#121215] border border-[#27272a] rounded-xl p-4 space-y-3">
           <div className="text-sm font-semibold text-[#f4f4f5]">
             JSON & CSV Veri Yedekleme

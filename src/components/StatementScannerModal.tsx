@@ -22,12 +22,16 @@ import {
   parseTurkishAmount,
 } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
+import { AccountApiKeyBox } from './AccountApiKeyBox';
 
 interface StatementScannerModalProps {
   isOpen: boolean;
   existingExpenses: Expense[];
   existingTags: string[];
   customApiKey?: string;
+  isAuthenticated?: boolean;
+  authHeaders?: Record<string, string>;
+  onSaveApiKey: (apiKey: string) => Promise<void>;
   onClose: () => void;
   onBatchSave: (items: ExtractedExpense[]) => Promise<void>;
 }
@@ -36,7 +40,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
   isOpen,
   existingExpenses,
   existingTags,
-  customApiKey,
+  customApiKey = '',
+  isAuthenticated = false,
+  authHeaders = {},
+  onSaveApiKey,
   onClose,
   onBatchSave,
 }) => {
@@ -99,7 +106,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
     setAnalyzing(true);
     setError('');
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      };
       if (customApiKey) {
         headers['x-custom-gemini-key'] = customApiKey;
       }
@@ -287,6 +297,13 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
               {error}
             </div>
           )}
+
+          {/* Hesaba Tanımlı Manuel Gemini API Anahtarı Alanı */}
+          <AccountApiKeyBox
+            savedApiKey={customApiKey}
+            isAuthenticated={isAuthenticated}
+            onSaveApiKey={onSaveApiKey}
+          />
 
           {/* Dosya Yükleme Alanı */}
           <div className="bg-[#121215] border border-dashed border-[#27272a] hover:border-[#10b981]/60 rounded-xl p-5 text-center transition-colors">
