@@ -7,6 +7,10 @@
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   }
 
+  html {
+    font-size: 85%;
+  }
+
   body {
     font-family: var(--font-sans);
     background-color: #09090b;

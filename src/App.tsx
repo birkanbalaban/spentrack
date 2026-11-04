@@ -714,7 +714,7 @@ export default function App() {
       )}
 
       {/* SubTrack Stili Üst Bar */}
-      <header className="sticky top-0 z-30 bg-[#0d0d10]/95 backdrop-blur-md border-b border-[#222226] px-4 sm:px-8 py-4 flex items-center justify-between gap-8">
+      <header className="sticky top-0 z-30 bg-[#0d0d10]/95 backdrop-blur-md border-b border-[#222226] px-4 sm:px-8 py-3 flex items-center justify-between gap-6">
         {/* Zone 1: ST Brand Wordmark */}
         <a
           href="#top"
@@ -722,9 +722,9 @@ export default function App() {
             e.preventDefault();
             setActiveView('list');
           }}
-          className="flex items-center gap-3 text-xl font-bold tracking-tight text-[#f4f4f5] whitespace-nowrap shrink-0"
+          className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-[#f4f4f5] whitespace-nowrap shrink-0"
         >
-          <span className="w-8 h-8 rounded-xl bg-[#18181b] border border-[#27272a] flex items-center justify-center font-mono text-xs font-bold tracking-wider text-[#f4f4f5]">
+          <span className="w-7 h-7 rounded-lg bg-[#18181b] border border-[#27272a] flex items-center justify-center font-mono text-xs font-bold tracking-wider text-[#f4f4f5]">
             ST
           </span>
           <span>SpenTrack</span>
@@ -733,7 +733,7 @@ export default function App() {
         {/* Zone 2: 5 concise single-line navigation links */}
         <nav
           aria-label="Ana Navigasyon"
-          className="hidden md:flex items-center gap-6 text-sm font-medium text-[#a1a1aa]"
+          className="hidden md:flex items-center gap-5 text-sm font-medium text-[#a1a1aa]"
         >
           <button
             type="button"
@@ -792,7 +792,7 @@ export default function App() {
               setEditingExpense(null);
               setIsManualModalOpen(true);
             }}
-            className="px-4 py-2.5 text-sm font-bold bg-white text-[#09090b] rounded-xl hover:bg-zinc-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="px-3.5 py-2 text-sm font-bold bg-white text-[#09090b] rounded-xl hover:bg-zinc-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             + Yeni Ekle
           </button>
@@ -800,14 +800,14 @@ export default function App() {
       </header>
 
       {/* Ana İçerik Konteyneri */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-8 pt-6 space-y-6">
+      <main className="max-w-7xl mx-auto px-4 sm:px-8 pt-4 space-y-4">
         {/* SubTrack Stili Hızlı Aksiyon, Döviz Kuru ve Aktif Profil Çubuğu */}
-        <div className="bg-[#111114] border border-[#222226] rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-3">
+        <div className="bg-[#111114] border border-[#222226] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={() => setIsScannerOpen(true)}
-              className="px-4 py-2.5 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#0ea5e9] transition-colors flex items-center gap-2 cursor-pointer"
+              className="px-3.5 py-2 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#0ea5e9] transition-colors flex items-center gap-2 cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4 text-[#0ea5e9] shrink-0" />
               <span className="sm:hidden">Fiş / PDF Ekstre Yükle</span>
@@ -819,7 +819,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setIsAssistantOpen(true)}
-              className="px-4 py-2.5 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#8b5cf6] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+              className="px-3.5 py-2 text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#8b5cf6] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
             >
               <Sparkles className="w-4 h-4 text-[#8b5cf6]" />
               <span>SpenTrack Gemini Asistanı</span>
@@ -828,7 +828,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setShowApiKeyBar((v) => !v)}
-              className={`px-3.5 py-2.5 text-sm font-medium rounded-xl border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+              className={`px-3 py-2 text-sm font-medium rounded-xl border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
                 showApiKeyBar || customApiKey
                   ? 'bg-[#10b981]/10 border-[#10b981]/40 text-[#10b981]'
                   : 'bg-[#18181c] border-[#27272a] text-[#a1a1aa] hover:text-[#f4f4f5] hover:border-[#3f3f46]'
@@ -952,9 +952,9 @@ export default function App() {
         {/* Arama, Kategori, Ay/Yıl, Görünüm Seçici ve Çok Renkli #etiket Filtre Barı */}
         <section
           aria-label="Filtreler ve Görünüm Seçimi"
-          className="bg-[#111114] border border-[#222226] rounded-2xl p-5 space-y-4"
+          className="bg-[#111114] border border-[#222226] rounded-xl p-4 space-y-3"
         >
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-center">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
             {/* Arama Çubuğu */}
             <div className="md:col-span-4 relative">
               <Search className="w-4 h-4 text-[#71717a] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
