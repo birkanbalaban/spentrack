@@ -199,13 +199,19 @@ export const SPENTRACK_MCP_TOOLS: McpToolDefinition[] = [
 
 export function buildMcpServerInfo() {
   return {
-    name: 'spentrack-mcp',
-    version: '1.0.0',
     protocolVersion: '2024-11-05',
     capabilities: {
-      tools: {},
+      tools: {
+        listChanged: false,
+      },
       prompts: {},
       resources: {},
     },
+    serverInfo: {
+      name: 'spentrack',
+      version: '1.0.0',
+    },
+    name: 'spentrack',
+    version: '1.0.0',
   };
 }

@@ -164,6 +164,28 @@ export const BotIntegrationModal: React.FC<BotIntegrationModalProps> = ({
     if (!botKey) return;
     setTestStatus({ loading: true });
     try {
+      // 1. MCP Initialize Handshake Test (ServerInfo check for OpenBot/Claude)
+      const initRes = await fetch('/api/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${botKey}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'test-init',
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'SpenTrack-Tester', version: '1.0.0' },
+          },
+        }),
+      });
+      const initData = await initRes.json();
+      const serverInfo = initData?.result?.serverInfo;
+
+      // 2. MCP Tools List Test
       const res = await fetch('/api/mcp', {
         method: 'POST',
         headers: {
@@ -180,10 +202,12 @@ export const BotIntegrationModal: React.FC<BotIntegrationModalProps> = ({
 
       const data = await res.json();
       if (res.ok && data?.result?.tools) {
+        const sName = serverInfo?.name || 'spentrack';
+        const sVer = serverInfo?.version || '1.0.0';
         setTestStatus({
           loading: false,
           success: true,
-          message: `Bağlantı başarılı! ${data.result.tools.length} adet MCP aracı aktif ve kullanıma hazır.`,
+          message: `El sıkışma başarılı! Sunucu: ${sName} v${sVer} · ${data.result.tools.length} adet MCP aracı aktif ve hazır.`,
         });
       } else {
         setTestStatus({
@@ -222,7 +246,7 @@ export const BotIntegrationModal: React.FC<BotIntegrationModalProps> = ({
                 <span>Model Context Protocol (MCP) & Bot Entegrasyonu</span>
               </h2>
               <p className="text-xs text-[#a1a1aa] mt-0.5">
-                Hermes Bot, OpenMaus veya Claude Desktop ile $0 maliyetle dışarıdan harcama ekleyin
+                OpenBot, Hermes Bot, OpenMaus veya Claude Desktop ile $0 maliyetle dışarıdan harcama ekleyin
               </p>
             </div>
           </div>
@@ -356,7 +380,7 @@ export const BotIntegrationModal: React.FC<BotIntegrationModalProps> = ({
                       : 'text-[#a1a1aa] hover:text-[#f4f4f5]'
                   }`}
                 >
-                  Hermes / OpenMaus Config
+                  OpenBot / Hermes / OpenMaus
                 </button>
                 <button
                   type="button"
@@ -386,7 +410,7 @@ export const BotIntegrationModal: React.FC<BotIntegrationModalProps> = ({
                 {activeTab === 'hermes' && (
                   <div className="space-y-2">
                     <p className="text-[11px] text-[#a1a1aa]">
-                      Hermes botunuzun veya OpenMaus ajanınızın `config.json` veya MCP ayar dosyasına aşağıdaki bloğu yapıştırın:
+                      OpenBot, Hermes veya OpenMaus istemcinizin `config.json` veya MCP ayar dosyasına aşağıdaki bloğu yapıştırın:
                     </p>
                     <div className="relative">
                       <pre className="p-3 bg-[#09090b] border border-[#27272a] rounded-xl font-mono text-[11px] text-[#10b981] overflow-x-auto">
