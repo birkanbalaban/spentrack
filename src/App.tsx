@@ -13,6 +13,7 @@ import {
   Eye,
   LogOut,
   KeyRound,
+  Bot,
 } from 'lucide-react';
 import {
   CurrencyCode,
@@ -39,6 +40,7 @@ import { ManualExpenseModal } from './components/ManualExpenseModal';
 import { StatementScannerModal } from './components/StatementScannerModal';
 import { AssistantDrawer } from './components/AssistantDrawer';
 import { DataSyncModal } from './components/DataSyncModal';
+import { BotIntegrationModal } from './components/BotIntegrationModal';
 import { LandingAuthView } from './components/LandingAuthView';
 import { AccountApiKeyBox } from './components/AccountApiKeyBox';
 import { triggerDirectGoogleLogin } from './lib/googleAuth';
@@ -218,6 +220,7 @@ export default function App() {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isBotModalOpen, setIsBotModalOpen] = useState(false);
   const [showApiKeyBar, setShowApiKeyBar] = useState(false);
 
   // Hesaba tanımlı Gemini API anahtarı (Tarayıcı localStorage yerine bulut kullanıcı hesabında tutulur)
@@ -855,6 +858,15 @@ export default function App() {
               <KeyRound className="w-4 h-4 shrink-0" />
               <span>{customApiKey ? 'API Anahtarı Tanımlı' : 'Gemini API Anahtarı'}</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setIsBotModalOpen(true)}
+              className="h-9 px-3 text-xs sm:text-sm font-medium bg-[#18181c] text-[#f4f4f5] border border-[#27272a] rounded-xl hover:border-[#10b981] transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Bot className="w-4 h-4 text-[#10b981] shrink-0" />
+              <span>MCP & Bot</span>
+            </button>
           </div>
 
           {/* Sağ: SubTrack Stili Döviz Seçici (₺ $ € £), Yedekleme ve Aktif Profil */}
@@ -1286,6 +1298,14 @@ export default function App() {
         onUpdateProfileName={() => {}}
         onSyncGuestToCloud={handleSyncGuestToCloud}
         onImportBatch={handleBatchSaveExpenses}
+        onOpenBotModal={() => setIsBotModalOpen(true)}
+      />
+
+      <BotIntegrationModal
+        isOpen={isBotModalOpen}
+        isAuthenticated={Boolean(authUser && !isDemoMode)}
+        authHeaders={authUser ? buildAuthHeaders(authUser.id, authToken) : {}}
+        onClose={() => setIsBotModalOpen(false)}
       />
     </div>
   );

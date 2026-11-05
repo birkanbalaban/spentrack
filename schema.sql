@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   avatar_url TEXT DEFAULT '',
   gemini_api_key TEXT DEFAULT '',
+  bot_api_key TEXT DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -27,3 +28,4 @@ CREATE TABLE IF NOT EXISTS expenses (
 
 CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(user_id, category);
+CREATE INDEX IF NOT EXISTS idx_users_bot_api_key ON users(bot_api_key);

@@ -17,6 +17,11 @@ import {
   normalizeTagList,
   parseTurkishAmount,
 } from './src/utils/expenseLogic';
+import {
+  SPENTRACK_MCP_TOOLS,
+  buildMcpServerInfo,
+  convertToTRY,
+} from './src/utils/mcpCore';
 
 const PORT = 3000;
 const LEGACY_TMP_DB_PATH = '/tmp/spentrack.sqlite';
@@ -40,6 +45,16 @@ try {
   db.exec("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''");
 } catch {
   // Column already exists
+}
+try {
+  db.exec("ALTER TABLE users ADD COLUMN bot_api_key TEXT DEFAULT ''");
+} catch {
+  // Column already exists
+}
+try {
+  db.exec("CREATE INDEX IF NOT EXISTS idx_users_bot_api_key ON users(bot_api_key)");
+} catch {
+  // Index already exists
 }
 
 // Seed realistic initial data for default_user if table is empty
@@ -689,6 +704,430 @@ async function startServer() {
       res.status(500).json({ error: msg });
     }
   });
+
+  // GET /api/user/botkey — Get the logged-in user's Bot API key
+  app.get('/api/user/botkey', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId || userId === 'default_user') {
+        res.json({ botApiKey: '', hasKey: false });
+        return;
+      }
+      const row = db
+        .prepare('SELECT bot_api_key FROM users WHERE id = ?')
+        .get(userId) as { bot_api_key?: string } | undefined;
+      const botApiKey = String(row?.bot_api_key || '').trim();
+      res.json({
+        botApiKey,
+        hasKey: botApiKey.startsWith('st_live_') && botApiKey.length > 20,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Bot anahtarı alınamadı';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // POST /api/user/botkey — Generate and save a new Bot API key
+  app.post('/api/user/botkey', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId || userId === 'default_user') {
+        res.status(401).json({
+          error: 'Bot API anahtarı oluşturmak için lütfen önce giriş yapın.',
+        });
+        return;
+      }
+      const rawHex = crypto.randomBytes(24).toString('hex');
+      const botApiKey = `st_live_${rawHex}`;
+
+      db.prepare(
+        `INSERT INTO users (id, email, name, bot_api_key, updated_at)
+         VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           bot_api_key = excluded.bot_api_key,
+           updated_at = datetime('now')`
+      ).run(userId, botApiKey);
+
+      res.json({
+        ok: true,
+        botApiKey,
+        hasKey: true,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Bot anahtarı oluşturulamadı';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // DELETE /api/user/botkey — Revoke the user's Bot API key
+  app.delete('/api/user/botkey', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId || userId === 'default_user') {
+        res.status(401).json({ error: 'Lütfen önce giriş yapın.' });
+        return;
+      }
+      db.prepare('UPDATE users SET bot_api_key = "", updated_at = datetime("now") WHERE id = ?').run(userId);
+      res.json({ ok: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Bot anahtarı silinemedi';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Helper to authenticate bot requests via Bearer st_live_ token
+  function resolveBotUser(req: express.Request): { id: string; name: string; email: string } | null {
+    const authHeader = req.headers.authorization || '';
+    const bearerMatch = authHeader.match(/^Bearer\s+(st_live_[a-zA-Z0-9_-]+)/i);
+    const token =
+      (bearerMatch ? bearerMatch[1] : null) ||
+      (typeof req.headers['x-bot-api-key'] === 'string' ? req.headers['x-bot-api-key'] : null) ||
+      (typeof req.query.key === 'string' ? req.query.key : null);
+
+    if (token && token.startsWith('st_live_')) {
+      const user = db.prepare('SELECT id, name, email FROM users WHERE bot_api_key = ?').get(token) as
+        | { id: string; name: string; email: string }
+        | undefined;
+      if (user) return user;
+    }
+
+    // Dev/browser test fallback if user is logged in
+    const userId = getUserId(req);
+    if (userId && userId !== 'default_user') {
+      const user = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(userId) as
+        | { id: string; name: string; email: string }
+        | undefined;
+      if (user) return user;
+    }
+
+    // Dev fallback if single user has a bot key configured
+    const singleUser = db.prepare("SELECT id, name, email FROM users WHERE bot_api_key != '' LIMIT 1").get() as
+      | { id: string; name: string; email: string }
+      | undefined;
+    if (singleUser && process.env.NODE_ENV !== 'production') {
+      return singleUser;
+    }
+
+    return null;
+  }
+
+  // Model Context Protocol (MCP) Streamable HTTP / JSON-RPC 2.0 Endpoint
+  async function handleMcpRequest(req: express.Request, res: express.Response) {
+    if (req.method === 'GET' && (req.headers.accept?.includes('text/event-stream') || req.path.endsWith('/sse'))) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+      res.write(`event: endpoint\ndata: /api/mcp\n\n`);
+      return;
+    }
+
+    const botUser = resolveBotUser(req);
+    const body = req.body || {};
+    const id = body.id ?? null;
+    const method = body.method;
+
+    if (method === 'initialize') {
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: buildMcpServerInfo(),
+      });
+    }
+
+    if (method === 'notifications/initialized') {
+      return res.status(200).json({ jsonrpc: '2.0' });
+    }
+
+    if (method === 'ping') {
+      return res.json({ jsonrpc: '2.0', id, result: {} });
+    }
+
+    if (!botUser) {
+      return res.status(401).json({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32001,
+          message:
+            "Yetkilendirme başarısız. Lütfen 'Authorization: Bearer st_live_...' başlığı ile geçerli bir SpenTrack Bot API Anahtarı gönderin.",
+        },
+      });
+    }
+
+    if (method === 'tools/list') {
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          tools: SPENTRACK_MCP_TOOLS,
+        },
+      });
+    }
+
+    if (method === 'tools/call') {
+      const toolName = body.params?.name;
+      const args = body.params?.arguments || {};
+
+      try {
+        if (toolName === 'add_expense') {
+          const title = String(args.title || '').trim();
+          const amount = Number(args.amount);
+          if (!title || !Number.isFinite(amount) || amount === 0) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: 'Hata: title ve sıfırdan farklı sayısal amount zorunludur.' }],
+                isError: true,
+              },
+            });
+          }
+
+          const currency = String(args.currency || 'TRY').toUpperCase();
+          const validCurrency = ['TRY', 'USD', 'EUR', 'GBP'].includes(currency) ? currency : 'TRY';
+          const amountInTRY = convertToTRY(amount, validCurrency);
+
+          const category = normalizeCategory(String(args.category || ''));
+          const tags = normalizeTagList(Array.isArray(args.tags) ? args.tags : []);
+          const date = args.date && /^\d{4}-\d{2}-\d{2}$/.test(args.date)
+            ? args.date
+            : new Date().toISOString().slice(0, 10);
+          const notes = String(args.notes || '').trim();
+          const expenseId = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+          db.prepare(
+            `INSERT INTO expenses (id, user_id, title, amount, currency, amount_in_try, category, tags, date, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).run(expenseId, botUser.id, title, amount, validCurrency, amountInTRY, category, JSON.stringify(tags), date, notes);
+
+          const sign = amount < 0 ? 'İade' : 'Harcama';
+          const text = `✅ ${sign} başarıyla kaydedildi:\n• İşyeri / Başlık: ${title}\n• Tutar: ${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 2 }).format(amount)} ${validCurrency}${validCurrency !== 'TRY' ? ` (${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 2 }).format(amountInTRY)} ₺)` : ''}\n• Kategori: ${category}\n• Tarih: ${date}\n• Etiketler: ${tags.join(' ') || '(etiketsiz)'}\n• ID: \`${expenseId}\`${notes ? `\n• Not: ${notes}` : ''}`;
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text }],
+              isError: false,
+              data: { id: expenseId, title, amount, currency: validCurrency, amountInTRY, category, tags, date, notes },
+            },
+          });
+        }
+
+        if (toolName === 'update_expense') {
+          const expId = String(args.id || '').trim();
+          if (!expId) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: 'Hata: Güncellenecek harcama id değeri zorunludur.' }], isError: true },
+            });
+          }
+
+          const existing = db.prepare('SELECT * FROM expenses WHERE id = ? AND user_id = ?').get(expId, botUser.id) as Record<string, unknown> | undefined;
+          if (!existing) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: `Hata: ${expId} ID'li harcama kaydı bulunamadı.` }], isError: true },
+            });
+          }
+
+          const title = args.title !== undefined ? String(args.title).trim() : String(existing.title);
+          const amount = args.amount !== undefined ? Number(args.amount) : Number(existing.amount);
+          const currency = args.currency !== undefined ? String(args.currency).toUpperCase() : String(existing.currency);
+          const amountInTRY = convertToTRY(amount, currency);
+          const category = args.category !== undefined ? normalizeCategory(String(args.category)) : String(existing.category);
+          const tags = args.tags !== undefined ? normalizeTagList(Array.isArray(args.tags) ? args.tags : []) : JSON.parse(String(existing.tags || '[]'));
+          const date = args.date !== undefined ? String(args.date) : String(existing.date);
+          const notes = args.notes !== undefined ? String(args.notes).trim() : String(existing.notes || '');
+
+          db.prepare(
+            `UPDATE expenses
+             SET title = ?, amount = ?, currency = ?, amount_in_try = ?, category = ?, tags = ?, date = ?, notes = ?
+             WHERE id = ? AND user_id = ?`
+          ).run(title, amount, currency, amountInTRY, category, JSON.stringify(tags), date, notes, expId, botUser.id);
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: `✅ Harcama (#${expId}) güncellendi:\n• ${title} • ${amount} ${currency} • ${category} • ${date}` }],
+              isError: false,
+            },
+          });
+        }
+
+        if (toolName === 'list_expenses') {
+          let sql = 'SELECT * FROM expenses WHERE user_id = ?';
+          const params: unknown[] = [botUser.id];
+
+          if (args.monthYear && /^\d{4}-\d{2}$/.test(args.monthYear)) {
+            sql += ' AND date LIKE ?';
+            params.push(`${args.monthYear}%`);
+          }
+          if (args.category) {
+            sql += ' AND category = ?';
+            params.push(normalizeCategory(String(args.category)));
+          }
+          if (args.query) {
+            sql += ' AND (title LIKE ? OR notes LIKE ?)';
+            const q = `%${args.query}%`;
+            params.push(q, q);
+          }
+
+          sql += ' ORDER BY date DESC, created_at DESC';
+          const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100);
+          sql += ` LIMIT ${limit}`;
+
+          let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+          if (args.tag) {
+            const rawTag = String(args.tag).trim().toLowerCase();
+            const cleanTag = rawTag.startsWith('#') ? rawTag : `#${rawTag}`;
+            rows = rows.filter((r) => {
+              try {
+                const list = JSON.parse(String(r.tags || '[]')) as string[];
+                return list.some((t) => t.toLowerCase() === cleanTag);
+              } catch {
+                return false;
+              }
+            });
+          }
+
+          if (rows.length === 0) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: 'Kriterlere uygun herhangi bir harcama kaydı bulunamadı.' }],
+                isError: false,
+                data: [],
+              },
+            });
+          }
+
+          const lines = rows.map((r, i) => {
+            const tags = JSON.parse(String(r.tags || '[]')).join(' ');
+            return `${i + 1}. **${r.title}**: ${Number(r.amount).toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${r.currency} (${r.date}) [${r.category}] ${tags} - ID: \`${r.id}\``;
+          });
+
+          const totalTRY = rows.reduce((s, r) => s + Number(r.amount_in_try || 0), 0);
+          const header = `📋 Toplam ${rows.length} harcama kaydı listelendi (Toplam: ${totalTRY.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺):\n\n`;
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: header + lines.join('\n') }],
+              isError: false,
+              data: rows,
+            },
+          });
+        }
+
+        if (toolName === 'get_financial_summary') {
+          const ym = args.monthYear && /^\d{4}-\d{2}$/.test(args.monthYear)
+            ? args.monthYear
+            : new Date().toISOString().slice(0, 7);
+
+          const rows = db
+            .prepare('SELECT * FROM expenses WHERE user_id = ? AND date LIKE ?')
+            .all(botUser.id, `${ym}%`) as Record<string, unknown>[];
+
+          let totalSpentTRY = 0;
+          let totalRefundTRY = 0;
+          const categoryTotals: Record<string, number> = {};
+
+          for (const r of rows) {
+            const amtTRY = Number(r.amount_in_try || 0);
+            if (amtTRY >= 0) {
+              totalSpentTRY += amtTRY;
+              const cat = String(r.category || 'Diğer');
+              categoryTotals[cat] = (categoryTotals[cat] || 0) + amtTRY;
+            } else {
+              totalRefundTRY += Math.abs(amtTRY);
+            }
+          }
+
+          const netTRY = totalSpentTRY - totalRefundTRY;
+          const topCategories = Object.entries(categoryTotals)
+            .sort((a, b) => b[1] - a[1])
+            .map(
+              ([cat, amt]) =>
+                `• ${cat}: ${amt.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺ (%${
+                  totalSpentTRY > 0 ? Math.round((amt / totalSpentTRY) * 100) : 0
+                })`
+            )
+            .join('\n');
+
+          const text = `📊 **SpenTrack Finansal Özeti (${ym})**:\n\n• Toplam Harcama: **${totalSpentTRY.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺**\n• Toplam İade / Geri Ödeme: **${totalRefundTRY.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺**\n• Net Dönem Harcaması: **${netTRY.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺**\n• Toplam İşlem Sayısı: **${rows.length} adet**\n\n**Kategori Dağılımı:**\n${topCategories || 'Henüz harcama yok.'}`;
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text }],
+              isError: false,
+              data: { monthYear: ym, totalSpentTRY, totalRefundTRY, netTRY, transactionCount: rows.length, categoryTotals },
+            },
+          });
+        }
+
+        if (toolName === 'delete_expense') {
+          const expId = String(args.id || '').trim();
+          if (!expId) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: 'Hata: Silinecek id zorunludur.' }], isError: true },
+            });
+          }
+
+          const info = db.prepare('DELETE FROM expenses WHERE id = ? AND user_id = ?').run(expId, botUser.id);
+          if (info.changes === 0) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: `Hata: ${expId} ID'li harcama kaydı bulunamadı.` }], isError: true },
+            });
+          }
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: `🗑️ ${expId} ID'li harcama kaydı başarıyla silindi.` }],
+              isError: false,
+            },
+          });
+        }
+
+        return res.json({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32601, message: `Bilinmeyen MCP aracı: '${toolName}'` },
+        });
+      } catch (toolErr) {
+        const msg = toolErr instanceof Error ? toolErr.message : 'Araç yürütülürken hata oluştu';
+        return res.json({
+          jsonrpc: '2.0',
+          id,
+          result: { content: [{ type: 'text', text: `Hata: ${msg}` }], isError: true },
+        });
+      }
+    }
+
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32601, message: `Desteklenmeyen metod: '${method}'` },
+    });
+  }
+
+  app.all('/api/mcp', handleMcpRequest);
+  app.all('/api/mcp/sse', handleMcpRequest);
 
   // GET /api/expenses
   app.get('/api/expenses', (req, res) => {

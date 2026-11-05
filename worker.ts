@@ -10,6 +10,13 @@ import {
   parseTurkishAmount,
 } from './src/utils/expenseLogic';
 import { ExpenseCategory, ExtractedExpense } from './src/types';
+import {
+  SPENTRACK_MCP_TOOLS,
+  buildMcpServerInfo,
+  convertToTRY,
+} from './src/utils/mcpCore';
+
+const memoryBotKeys = new Map<string, string>();
 
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -515,6 +522,11 @@ async function ensureSchema(db?: D1Database): Promise<void> {
     } catch {
       // Column already exists
     }
+    try {
+      await db.prepare("ALTER TABLE users ADD COLUMN bot_api_key TEXT DEFAULT ''").run();
+    } catch {
+      // Column already exists
+    }
     schemaInitialized = true;
   } catch {
     // ignore
@@ -667,6 +679,574 @@ export default {
             apiKey,
             hasKey: apiKey.length > 10,
           },
+          { headers: corsHeaders }
+        );
+      }
+
+      // GET /api/user/botkey
+      if (url.pathname === '/api/user/botkey' && request.method === 'GET') {
+        if (!userId || userId === 'default_user') {
+          return Response.json({ botApiKey: '', hasKey: false }, { headers: corsHeaders });
+        }
+        let botApiKey = memoryBotKeys.get(userId) || '';
+        if (env.DB) {
+          try {
+            const row = await env.DB.prepare('SELECT bot_api_key FROM users WHERE id = ?')
+              .bind(userId)
+              .first<{ bot_api_key?: string }>();
+            if (row && typeof row.bot_api_key === 'string') {
+              botApiKey = row.bot_api_key.trim();
+            }
+          } catch {
+            // ignore
+          }
+        }
+        return Response.json(
+          {
+            botApiKey,
+            hasKey: botApiKey.startsWith('st_live_') && botApiKey.length > 20,
+          },
+          { headers: corsHeaders }
+        );
+      }
+
+      // POST /api/user/botkey
+      if (url.pathname === '/api/user/botkey' && request.method === 'POST') {
+        if (!userId || userId === 'default_user') {
+          return Response.json(
+            { error: 'Bot API anahtarı oluşturmak için lütfen önce giriş yapın.' },
+            { status: 401, headers: corsHeaders }
+          );
+        }
+        const rawHex = Array.from(crypto.getRandomValues(new Uint8Array(20)))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+        const botApiKey = `st_live_${rawHex}`;
+        memoryBotKeys.set(userId, botApiKey);
+
+        if (env.DB) {
+          await env.DB.prepare(
+            `INSERT INTO users (id, email, name, bot_api_key, updated_at)
+             VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+               bot_api_key = excluded.bot_api_key,
+               updated_at = datetime('now')`
+          )
+            .bind(userId, botApiKey)
+            .run();
+        }
+
+        return Response.json({ ok: true, botApiKey, hasKey: true }, { headers: corsHeaders });
+      }
+
+      // DELETE /api/user/botkey
+      if (url.pathname === '/api/user/botkey' && request.method === 'DELETE') {
+        if (!userId || userId === 'default_user') {
+          return Response.json({ error: 'Lütfen önce giriş yapın.' }, { status: 401, headers: corsHeaders });
+        }
+        memoryBotKeys.delete(userId);
+        if (env.DB) {
+          await env.DB.prepare('UPDATE users SET bot_api_key = "", updated_at = datetime("now") WHERE id = ?')
+            .bind(userId)
+            .run();
+        }
+        return Response.json({ ok: true }, { headers: corsHeaders });
+      }
+
+      // MCP Endpoint (/api/mcp and /api/mcp/sse)
+      if (url.pathname === '/api/mcp' || url.pathname === '/api/mcp/sse') {
+        // SSE handshake
+        if (
+          request.method === 'GET' &&
+          (request.headers.get('Accept')?.includes('text/event-stream') || url.pathname.endsWith('/sse'))
+        ) {
+          return new Response(`event: endpoint\ndata: ${url.origin}/api/mcp\n\n`, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            },
+          });
+        }
+
+        // Resolve Bot User
+        const authHeader = request.headers.get('Authorization') || '';
+        const bearerMatch = authHeader.match(/^Bearer\s+(st_live_[a-zA-Z0-9_-]+)/i);
+        const token =
+          (bearerMatch ? bearerMatch[1] : null) ||
+          request.headers.get('x-bot-api-key') ||
+          url.searchParams.get('key');
+
+        let targetUserId: string | null = null;
+        if (token && token.startsWith('st_live_')) {
+          if (env.DB) {
+            const userRow = await env.DB.prepare('SELECT id FROM users WHERE bot_api_key = ?')
+              .bind(token)
+              .first<{ id: string }>();
+            if (userRow?.id) targetUserId = userRow.id;
+          }
+          if (!targetUserId) {
+            for (const [uid, bkey] of memoryBotKeys.entries()) {
+              if (bkey === token) {
+                targetUserId = uid;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!targetUserId && userId && userId !== 'default_user') {
+          targetUserId = userId;
+        }
+
+        let body: {
+          id?: string | number | null;
+          method?: string;
+          params?: { name?: string; arguments?: Record<string, unknown> };
+        } = {};
+        try {
+          body = (await request.json()) as typeof body;
+        } catch {
+          // ignore
+        }
+
+        const id = body.id ?? null;
+        const method = body.method;
+
+        if (method === 'initialize') {
+          return Response.json({ jsonrpc: '2.0', id, result: buildMcpServerInfo() }, { headers: corsHeaders });
+        }
+        if (method === 'notifications/initialized') {
+          return Response.json({ jsonrpc: '2.0' }, { headers: corsHeaders });
+        }
+        if (method === 'ping') {
+          return Response.json({ jsonrpc: '2.0', id, result: {} }, { headers: corsHeaders });
+        }
+
+        if (!targetUserId) {
+          return Response.json(
+            {
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32001,
+                message:
+                  "Yetkilendirme başarısız. Lütfen 'Authorization: Bearer st_live_...' başlığı ile geçerli bir SpenTrack Bot API Anahtarı gönderin.",
+              },
+            },
+            { status: 401, headers: corsHeaders }
+          );
+        }
+
+        if (method === 'tools/list') {
+          return Response.json(
+            { jsonrpc: '2.0', id, result: { tools: SPENTRACK_MCP_TOOLS } },
+            { headers: corsHeaders }
+          );
+        }
+
+        if (method === 'tools/call') {
+          const toolName = body.params?.name;
+          const args = body.params?.arguments || {};
+
+          try {
+            if (toolName === 'add_expense') {
+              const title = String(args.title || '').trim();
+              const amount = Number(args.amount);
+              if (!title || !Number.isFinite(amount) || amount === 0) {
+                return Response.json(
+                  {
+                    jsonrpc: '2.0',
+                    id,
+                    result: {
+                      content: [{ type: 'text', text: 'Hata: title ve sıfırdan farklı sayısal amount zorunludur.' }],
+                      isError: true,
+                    },
+                  },
+                  { headers: corsHeaders }
+                );
+              }
+
+              const currency = String(args.currency || 'TRY').toUpperCase();
+              const validCurrency = ['TRY', 'USD', 'EUR', 'GBP'].includes(currency) ? currency : 'TRY';
+              const amountInTRY = convertToTRY(amount, validCurrency);
+
+              const category = normalizeCategory(String(args.category || ''));
+              const tags = normalizeTagList(Array.isArray(args.tags) ? args.tags : []);
+              const date =
+                args.date && /^\d{4}-\d{2}-\d{2}$/.test(String(args.date))
+                  ? String(args.date)
+                  : new Date().toISOString().slice(0, 10);
+              const notes = String(args.notes || '').trim();
+              const expenseId = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+              if (env.DB) {
+                await env.DB.prepare(
+                  `INSERT INTO expenses (id, user_id, title, amount, currency, amount_in_try, category, tags, date, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                )
+                  .bind(
+                    expenseId,
+                    targetUserId,
+                    title,
+                    amount,
+                    validCurrency,
+                    amountInTRY,
+                    category,
+                    JSON.stringify(tags),
+                    date,
+                    notes
+                  )
+                  .run();
+              } else {
+                const userList = memoryExpenses.get(targetUserId) || [];
+                userList.unshift({
+                  id: expenseId,
+                  user_id: targetUserId,
+                  title,
+                  amount,
+                  currency: validCurrency,
+                  amount_in_try: amountInTRY,
+                  category,
+                  tags: JSON.stringify(tags),
+                  date,
+                  notes,
+                  created_at: new Date().toISOString(),
+                });
+                memoryExpenses.set(targetUserId, userList);
+              }
+
+              const sign = amount < 0 ? 'İade' : 'Harcama';
+              const text = `✅ ${sign} başarıyla kaydedildi:\n• İşyeri / Başlık: ${title}\n• Tutar: ${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 2 }).format(amount)} ${validCurrency}${validCurrency !== 'TRY' ? ` (${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 2 }).format(amountInTRY)} ₺)` : ''}\n• Kategori: ${category}\n• Tarih: ${date}\n• Etiketler: ${tags.join(' ') || '(etiketsiz)'}\n• ID: \`${expenseId}\`${notes ? `\n• Not: ${notes}` : ''}`;
+
+              return Response.json(
+                {
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [{ type: 'text', text }],
+                    isError: false,
+                    data: {
+                      id: expenseId,
+                      title,
+                      amount,
+                      currency: validCurrency,
+                      amountInTRY,
+                      category,
+                      tags,
+                      date,
+                      notes,
+                    },
+                  },
+                },
+                { headers: corsHeaders }
+              );
+            }
+
+            if (toolName === 'update_expense') {
+              const expId = String(args.id || '').trim();
+              if (!expId) {
+                return Response.json(
+                  {
+                    jsonrpc: '2.0',
+                    id,
+                    result: { content: [{ type: 'text', text: 'Hata: Güncellenecek harcama id değeri zorunludur.' }], isError: true },
+                  },
+                  { headers: corsHeaders }
+                );
+              }
+
+              let existing: Record<string, unknown> | null = null;
+              if (env.DB) {
+                existing = await env.DB.prepare('SELECT * FROM expenses WHERE id = ? AND user_id = ?')
+                  .bind(expId, targetUserId)
+                  .first();
+              } else {
+                const list = memoryExpenses.get(targetUserId) || [];
+                existing = list.find((e) => e.id === expId) || null;
+              }
+
+              if (!existing) {
+                return Response.json(
+                  {
+                    jsonrpc: '2.0',
+                    id,
+                    result: { content: [{ type: 'text', text: `Hata: ${expId} ID'li harcama kaydı bulunamadı.` }], isError: true },
+                  },
+                  { headers: corsHeaders }
+                );
+              }
+
+              const title = args.title !== undefined ? String(args.title).trim() : String(existing.title);
+              const amount = args.amount !== undefined ? Number(args.amount) : Number(existing.amount);
+              const currency =
+                args.currency !== undefined ? String(args.currency).toUpperCase() : String(existing.currency);
+              const amountInTRY = convertToTRY(amount, currency);
+              const category =
+                args.category !== undefined ? normalizeCategory(String(args.category)) : String(existing.category);
+              const tags =
+                args.tags !== undefined
+                  ? normalizeTagList(Array.isArray(args.tags) ? args.tags : [])
+                  : JSON.parse(String(existing.tags || '[]'));
+              const date = args.date !== undefined ? String(args.date) : String(existing.date);
+              const notes = args.notes !== undefined ? String(args.notes).trim() : String(existing.notes || '');
+
+              if (env.DB) {
+                await env.DB.prepare(
+                  `UPDATE expenses
+                   SET title = ?, amount = ?, currency = ?, amount_in_try = ?, category = ?, tags = ?, date = ?, notes = ?
+                   WHERE id = ? AND user_id = ?`
+                )
+                  .bind(
+                    title,
+                    amount,
+                    currency,
+                    amountInTRY,
+                    category,
+                    JSON.stringify(tags),
+                    date,
+                    notes,
+                    expId,
+                    targetUserId
+                  )
+                  .run();
+              }
+
+              return Response.json(
+                {
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [
+                      {
+                        type: 'text',
+                        text: `✅ Harcama (#${expId}) güncellendi:\n• ${title} • ${amount} ${currency} • ${category} • ${date}`,
+                      },
+                    ],
+                    isError: false,
+                  },
+                },
+                { headers: corsHeaders }
+              );
+            }
+
+            if (toolName === 'list_expenses') {
+              let rows: Record<string, unknown>[] = [];
+              if (env.DB) {
+                let sql = 'SELECT * FROM expenses WHERE user_id = ?';
+                const sqlParams: unknown[] = [targetUserId];
+                if (args.monthYear && /^\d{4}-\d{2}$/.test(String(args.monthYear))) {
+                  sql += ' AND date LIKE ?';
+                  sqlParams.push(`${args.monthYear}%`);
+                }
+                if (args.category) {
+                  sql += ' AND category = ?';
+                  sqlParams.push(normalizeCategory(String(args.category)));
+                }
+                if (args.query) {
+                  sql += ' AND (title LIKE ? OR notes LIKE ?)';
+                  const q = `%${args.query}%`;
+                  sqlParams.push(q, q);
+                }
+                sql += ' ORDER BY date DESC, created_at DESC';
+                const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100);
+                sql += ` LIMIT ${limit}`;
+                const result = await env.DB.prepare(sql).bind(...sqlParams).all();
+                rows = result.results || [];
+              } else {
+                rows = memoryExpenses.get(targetUserId) || [];
+              }
+
+              if (args.tag) {
+                const rawTag = String(args.tag).trim().toLowerCase();
+                const cleanTag = rawTag.startsWith('#') ? rawTag : `#${rawTag}`;
+                rows = rows.filter((r) => {
+                  try {
+                    const list = JSON.parse(String(r.tags || '[]')) as string[];
+                    return list.some((t) => t.toLowerCase() === cleanTag);
+                  } catch {
+                    return false;
+                  }
+                });
+              }
+
+              if (rows.length === 0) {
+                return Response.json(
+                  {
+                    jsonrpc: '2.0',
+                    id,
+                    result: {
+                      content: [{ type: 'text', text: 'Kriterlere uygun herhangi bir harcama kaydı bulunamadı.' }],
+                      isError: false,
+                      data: [],
+                    },
+                  },
+                  { headers: corsHeaders }
+                );
+              }
+
+              const lines = rows.map((r, i) => {
+                const tags = JSON.parse(String(r.tags || '[]')).join(' ');
+                return `${i + 1}. **${r.title}**: ${Number(r.amount).toLocaleString('tr-TR', {
+                  minimumFractionDigits: 2,
+                })} ${r.currency} (${r.date}) [${r.category}] ${tags} - ID: \`${r.id}\``;
+              });
+
+              const totalTRY = rows.reduce((s, r) => s + Number(r.amount_in_try || 0), 0);
+              const header = `📋 Toplam ${rows.length} harcama kaydı listelendi (Toplam: ${totalTRY.toLocaleString('tr-TR', {
+                minimumFractionDigits: 2,
+              })} ₺):\n\n`;
+
+              return Response.json(
+                {
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [{ type: 'text', text: header + lines.join('\n') }],
+                    isError: false,
+                    data: rows,
+                  },
+                },
+                { headers: corsHeaders }
+              );
+            }
+
+            if (toolName === 'get_financial_summary') {
+              const ym =
+                args.monthYear && /^\d{4}-\d{2}$/.test(String(args.monthYear))
+                  ? String(args.monthYear)
+                  : new Date().toISOString().slice(0, 7);
+
+              let rows: Record<string, unknown>[] = [];
+              if (env.DB) {
+                const res = await env.DB.prepare('SELECT * FROM expenses WHERE user_id = ? AND date LIKE ?')
+                  .bind(targetUserId, `${ym}%`)
+                  .all();
+                rows = res.results || [];
+              } else {
+                rows = (memoryExpenses.get(targetUserId) || []).filter((r) => String(r.date || '').startsWith(ym));
+              }
+
+              let totalSpentTRY = 0;
+              let totalRefundTRY = 0;
+              const categoryTotals: Record<string, number> = {};
+
+              for (const r of rows) {
+                const amtTRY = Number(r.amount_in_try || 0);
+                if (amtTRY >= 0) {
+                  totalSpentTRY += amtTRY;
+                  const cat = String(r.category || 'Diğer');
+                  categoryTotals[cat] = (categoryTotals[cat] || 0) + amtTRY;
+                } else {
+                  totalRefundTRY += Math.abs(amtTRY);
+                }
+              }
+
+              const netTRY = totalSpentTRY - totalRefundTRY;
+              const topCategories = Object.entries(categoryTotals)
+                .sort((a, b) => b[1] - a[1])
+                .map(
+                  ([cat, amt]) =>
+                    `• ${cat}: ${amt.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺ (%${
+                      totalSpentTRY > 0 ? Math.round((amt / totalSpentTRY) * 100) : 0
+                    })`
+                )
+                .join('\n');
+
+              const text = `📊 **SpenTrack Finansal Özeti (${ym})**:\n\n• Toplam Harcama: **${totalSpentTRY.toLocaleString(
+                'tr-TR',
+                { minimumFractionDigits: 2 }
+              )} ₺**\n• Toplam İade / Geri Ödeme: **${totalRefundTRY.toLocaleString('tr-TR', {
+                minimumFractionDigits: 2,
+              })} ₺**\n• Net Dönem Harcaması: **${netTRY.toLocaleString('tr-TR', {
+                minimumFractionDigits: 2,
+              })} ₺**\n• Toplam İşlem Sayısı: **${rows.length} adet**\n\n**Kategori Dağılımı:**\n${
+                topCategories || 'Henüz harcama yok.'
+              }`;
+
+              return Response.json(
+                {
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [{ type: 'text', text }],
+                    isError: false,
+                    data: {
+                      monthYear: ym,
+                      totalSpentTRY,
+                      totalRefundTRY,
+                      netTRY,
+                      transactionCount: rows.length,
+                      categoryTotals,
+                    },
+                  },
+                },
+                { headers: corsHeaders }
+              );
+            }
+
+            if (toolName === 'delete_expense') {
+              const expId = String(args.id || '').trim();
+              if (!expId) {
+                return Response.json(
+                  {
+                    jsonrpc: '2.0',
+                    id,
+                    result: { content: [{ type: 'text', text: 'Hata: Silinecek id zorunludur.' }], isError: true },
+                  },
+                  { headers: corsHeaders }
+                );
+              }
+
+              if (env.DB) {
+                const info = await env.DB.prepare('DELETE FROM expenses WHERE id = ? AND user_id = ?')
+                  .bind(expId, targetUserId)
+                  .run();
+                if (!info.success) {
+                  return Response.json(
+                    {
+                      jsonrpc: '2.0',
+                      id,
+                      result: { content: [{ type: 'text', text: `Hata: ${expId} ID'li harcama kaydı silinemedi.` }], isError: true },
+                    },
+                    { headers: corsHeaders }
+                  );
+                }
+              }
+
+              return Response.json(
+                {
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [{ type: 'text', text: `🗑️ ${expId} ID'li harcama kaydı başarıyla silindi.` }],
+                    isError: false,
+                  },
+                },
+                { headers: corsHeaders }
+              );
+            }
+
+            return Response.json(
+              { jsonrpc: '2.0', id, error: { code: -32601, message: `Bilinmeyen MCP aracı: '${toolName}'` } },
+              { headers: corsHeaders }
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Araç yürütülürken hata oluştu';
+            return Response.json(
+              {
+                jsonrpc: '2.0',
+                id,
+                result: { content: [{ type: 'text', text: `Hata: ${msg}` }], isError: true },
+              },
+              { headers: corsHeaders }
+            );
+          }
+        }
+
+        return Response.json(
+          { jsonrpc: '2.0', id, error: { code: -32601, message: `Desteklenmeyen metod: '${method}'` } },
           { headers: corsHeaders }
         );
       }

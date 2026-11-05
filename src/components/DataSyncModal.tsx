@@ -6,6 +6,7 @@ import {
   Check,
   Smartphone,
   LogOut,
+  Bot,
 } from 'lucide-react';
 import { Expense, ExtractedExpense, UserProfile } from '../types';
 import {
@@ -31,6 +32,7 @@ interface DataSyncModalProps {
   onUpdateProfileName: (name: string) => void;
   onSyncGuestToCloud: () => Promise<number>;
   onImportBatch: (items: ExtractedExpense[]) => Promise<void>;
+  onOpenBotModal?: () => void;
 }
 
 export const DataSyncModal: React.FC<DataSyncModalProps> = ({
@@ -43,6 +45,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
   onGoogleLogin,
   onGoogleLogout,
   onImportBatch,
+  onOpenBotModal,
 }) => {
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -295,7 +298,32 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
           </div>
         </div>
 
-        {/* 3. Mobil PWA Kurulum Durumu */}
+        {/* 4. Model Context Protocol (MCP) & Bot Entegrasyonu */}
+        <div className="bg-[#121215] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Bot className="w-5 h-5 text-[#10b981] shrink-0" />
+            <div className="text-xs sm:text-sm">
+              <div className="font-semibold text-[#f4f4f5]">MCP & Bot Entegrasyonu</div>
+              <div className="text-[#a1a1aa]">
+                Hermes, OpenMaus veya Claude Desktop ile $0 maliyetle dışarıdan harcama ekleyin.
+              </div>
+            </div>
+          </div>
+          {onOpenBotModal && (
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenBotModal();
+              }}
+              className="px-3.5 py-2 text-xs font-semibold bg-[#27272a] hover:bg-[#3f3f46] text-[#f4f4f5] rounded-xl whitespace-nowrap cursor-pointer transition-colors"
+            >
+              Yapılandır
+            </button>
+          )}
+        </div>
+
+        {/* 5. Mobil PWA Kurulum Durumu */}
         {!isInstalled && (
           <div className="bg-[#121215] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
