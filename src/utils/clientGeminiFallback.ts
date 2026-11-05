@@ -11,12 +11,31 @@ import {
   parseTurkishAmount,
 } from './expenseLogic';
 
-const CLIENT_MODELS = [
+export const ACTIVE_GEMINI_MODELS = [
   'gemini-3.8-flash',
-  'gemini-3.1-flash-lite',
   'gemini-flash-latest',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3-flash-preview',
+  'gemini-flash-lite-latest',
   'gemini-2.5-flash',
 ];
+
+function createClientCandidates(apiKey: string): GoogleGenAI[] {
+  const trimmed = apiKey.trim();
+  // AQ... keys can be either Gemini Developer API keys or Vertex AI Express Mode keys
+  if (trimmed.startsWith('AQ')) {
+    return [
+      new GoogleGenAI({ apiKey: trimmed }),
+      new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
+    ];
+  }
+  return [
+    new GoogleGenAI({ apiKey: trimmed }),
+    new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
+  ];
+}
 
 export async function extractStatementDirectClient(params: {
   apiKey: string;
@@ -28,7 +47,7 @@ export async function extractStatementDirectClient(params: {
   expenses: ExtractedExpense[];
 }> {
   const { apiKey, files, existingTags } = params;
-  const ai = new GoogleGenAI({ apiKey });
+  const clients = createClientCandidates(apiKey);
   const todayISO = new Date().toISOString().split('T')[0];
 
   const systemInstruction = `Sen Türkiye finans ve bankacılık ekstreleri konusunda uzman bir Muhasebe & Harcama Ayrıştırma Yapay Zekasısın.
@@ -72,9 +91,10 @@ KRİTİK TÜRKİYE BANKACILIK KURALLARI:
   }
 
   let lastError: unknown = null;
-  for (const model of CLIENT_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
+  for (const ai of clients) {
+    for (const model of ACTIVE_GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
         model,
         contents: [{ role: 'user', parts }],
         config: {
@@ -152,13 +172,18 @@ KRİTİK TÜRKİYE BANKACILIK KURALLARI:
         }
       );
 
-      return {
-        detectedBank: String(parsed.detectedBank || ''),
-        summaryNote: String(parsed.summaryNote || `${normalized.length} satır ayrıştırıldı.`),
-        expenses: normalized,
-      };
-    } catch (err) {
-      lastError = err;
+        return {
+          detectedBank: String(parsed.detectedBank || ''),
+          summaryNote: String(parsed.summaryNote || `${normalized.length} satır ayrıştırıldı.`),
+          expenses: normalized,
+        };
+      } catch (err) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err || '');
+        if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+          break;
+        }
+      }
     }
   }
 
@@ -181,7 +206,7 @@ export async function chatWithAssistantDirectClient(params: {
   proposedExpenses: ExtractedExpense[];
 }> {
   const { apiKey, message, files, existingExpenses, existingTags } = params;
-  const ai = new GoogleGenAI({ apiKey });
+  const clients = createClientCandidates(apiKey);
   const todayISO = new Date().toISOString().split('T')[0];
 
   const compactExpenses = existingExpenses.slice(0, 180).map((e) => ({
@@ -218,108 +243,114 @@ YETENEKLERİN:
   }
 
   let lastError: unknown = null;
-  for (const model of CLIENT_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: { type: Type.STRING },
-              analysisHighlight: {
-                type: Type.OBJECT,
-                properties: {
-                  label: { type: Type.STRING },
-                  totalTRY: { type: Type.NUMBER },
-                  count: { type: Type.NUMBER },
-                },
-              },
-              proposedExpenses: {
-                type: Type.ARRAY,
-                items: {
+  for (const ai of clients) {
+    for (const model of ACTIVE_GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                reply: { type: Type.STRING },
+                analysisHighlight: {
                   type: Type.OBJECT,
                   properties: {
-                    title: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    currency: { type: Type.STRING },
-                    amountInTRY: { type: Type.NUMBER },
-                    category: { type: Type.STRING },
-                    tags: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                    date: { type: Type.STRING },
-                    notes: { type: Type.STRING },
+                    label: { type: Type.STRING },
+                    totalTRY: { type: Type.NUMBER },
+                    count: { type: Type.NUMBER },
                   },
-                  required: [
-                    'title',
-                    'amount',
-                    'currency',
-                    'amountInTRY',
-                    'category',
-                    'tags',
-                    'date',
-                  ],
+                },
+                proposedExpenses: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      title: { type: Type.STRING },
+                      amount: { type: Type.NUMBER },
+                      currency: { type: Type.STRING },
+                      amountInTRY: { type: Type.NUMBER },
+                      category: { type: Type.STRING },
+                      tags: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      date: { type: Type.STRING },
+                      notes: { type: Type.STRING },
+                    },
+                    required: [
+                      'title',
+                      'amount',
+                      'currency',
+                      'amountInTRY',
+                      'category',
+                      'tags',
+                      'date',
+                    ],
+                  },
                 },
               },
+              required: ['reply'],
             },
-            required: ['reply'],
           },
-        },
-      });
+        });
 
-      const parsed = JSON.parse(response.text || '{}');
-      const proposed: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
-        (item: Record<string, unknown>) => {
-          const amt =
-            typeof item.amount === 'number'
-              ? item.amount
-              : parseTurkishAmount(String(item.amount || 0));
-          const amtTRY =
-            typeof item.amountInTRY === 'number'
-              ? item.amountInTRY
-              : parseTurkishAmount(String(item.amountInTRY || amt));
-          const rawCurr = String(item.currency || 'TRY').toUpperCase();
-          const curr = (['TRY', 'USD', 'EUR', 'GBP'].includes(rawCurr)
-            ? rawCurr
-            : 'TRY') as ExtractedExpense['currency'];
+        const parsed = JSON.parse(response.text || '{}');
+        const proposed: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
+          (item: Record<string, unknown>) => {
+            const amt =
+              typeof item.amount === 'number'
+                ? item.amount
+                : parseTurkishAmount(String(item.amount || 0));
+            const amtTRY =
+              typeof item.amountInTRY === 'number'
+                ? item.amountInTRY
+                : parseTurkishAmount(String(item.amountInTRY || amt));
+            const rawCurr = String(item.currency || 'TRY').toUpperCase();
+            const curr = (['TRY', 'USD', 'EUR', 'GBP'].includes(rawCurr)
+              ? rawCurr
+              : 'TRY') as ExtractedExpense['currency'];
 
-          return {
-            title: String(item.title || 'Harcama').trim(),
-            amount: amt,
-            currency: curr,
-            amountInTRY: amtTRY || amt,
-            category: normalizeCategory(String(item.category || 'Diğer')) as ExpenseCategory,
-            tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
-            date:
-              typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
-                ? item.date
-                : todayISO,
-            notes: String(item.notes || '').trim(),
-          };
+            return {
+              title: String(item.title || 'Harcama').trim(),
+              amount: amt,
+              currency: curr,
+              amountInTRY: amtTRY || amt,
+              category: normalizeCategory(String(item.category || 'Diğer')) as ExpenseCategory,
+              tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
+              date:
+                typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
+                  ? item.date
+                  : todayISO,
+              notes: String(item.notes || '').trim(),
+            };
+          }
+        );
+
+        const highlight =
+          parsed.analysisHighlight && typeof parsed.analysisHighlight === 'object'
+            ? {
+                label: String(parsed.analysisHighlight.label || ''),
+                totalTRY: Number(parsed.analysisHighlight.totalTRY || 0),
+                count: Number(parsed.analysisHighlight.count || 0),
+              }
+            : undefined;
+
+        return {
+          reply: String(parsed.reply || 'İşleminiz tamamlandı.'),
+          analysisHighlight: highlight,
+          proposedExpenses: proposed,
+        };
+      } catch (err) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err || '');
+        if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+          break;
         }
-      );
-
-      const highlight =
-        parsed.analysisHighlight && typeof parsed.analysisHighlight === 'object'
-          ? {
-              label: String(parsed.analysisHighlight.label || ''),
-              totalTRY: Number(parsed.analysisHighlight.totalTRY || 0),
-              count: Number(parsed.analysisHighlight.count || 0),
-            }
-          : undefined;
-
-      return {
-        reply: String(parsed.reply || 'İşleminiz tamamlandı.'),
-        analysisHighlight: highlight,
-        proposedExpenses: proposed,
-      };
-    } catch (err) {
-      lastError = err;
+      }
     }
   }
 

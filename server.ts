@@ -317,24 +317,49 @@ async function generateGeminiContentWithFallback(
 ): Promise<string> {
   let lastError: unknown = null;
 
+  const ACTIVE_MODELS = [
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3-flash-preview',
+    'gemini-flash-lite-latest',
+    'gemini-4-argon',
+    'gemini-2.5-flash',
+  ];
+
   for (const apiKey of candidateKeys) {
-    // Both classic 'AIza...' and modern Google AI Studio 'AQ...' user keys
-    // must be called WITHOUT 'User-Agent: aistudio-build' first so they connect directly to Google GenAI.
-    const clientConfigs = [
+    // Supports:
+    // 1. Direct Gemini Developer API (generativelanguage.googleapis.com) for AIza... and AQ... keys
+    // 2. Vertex AI Express Mode (aiplatform.googleapis.com via vertexai: true) for AQ... service keys
+    // 3. AI Studio Build internal proxy (User-Agent: aistudio-build)
+    const clientConfigs: Array<{
+      vertexai?: boolean;
+      httpOptions?: { headers: Record<string, string> };
+      models: string[];
+    }> = [
       {
         httpOptions: undefined,
-        models: ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash'],
+        models: ACTIVE_MODELS,
+      },
+      {
+        vertexai: true,
+        httpOptions: undefined,
+        models: ACTIVE_MODELS,
       },
       {
         httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        models: ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'],
+        models: ACTIVE_MODELS,
       },
     ];
 
     for (const cfg of clientConfigs) {
-      const ai = new GoogleGenAI(
-        cfg.httpOptions ? { apiKey, httpOptions: cfg.httpOptions } : { apiKey }
-      );
+      const ai = new GoogleGenAI({
+        apiKey,
+        ...(cfg.vertexai ? { vertexai: true } : {}),
+        ...(cfg.httpOptions ? { httpOptions: cfg.httpOptions } : {}),
+      });
 
       for (const modelName of cfg.models) {
         try {
