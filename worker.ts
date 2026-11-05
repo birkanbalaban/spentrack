@@ -878,7 +878,8 @@ export default {
           return Response.json({ jsonrpc: '2.0', id, result: buildMcpServerInfo() }, { headers: corsHeaders });
         }
         if (method === 'notifications/initialized') {
-          return Response.json({ jsonrpc: '2.0' }, { headers: corsHeaders });
+          // Accepted MCP notifications have no JSON-RPC response body.
+          return new Response(null, { status: 202, headers: corsHeaders });
         }
         if (method === 'ping') {
           return Response.json({ jsonrpc: '2.0', id, result: {} }, { headers: corsHeaders });

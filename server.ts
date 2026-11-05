@@ -852,7 +852,8 @@ async function startServer() {
     }
 
     if (method === 'notifications/initialized') {
-      return res.status(200).json({ jsonrpc: '2.0' });
+      // Accepted MCP notifications have no JSON-RPC response body.
+      return res.status(202).end();
     }
 
     if (method === 'ping') {
