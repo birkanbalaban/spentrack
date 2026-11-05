@@ -168,7 +168,11 @@ export async function chatWithAssistantDirectClient(params: {
   existingTags: string[];
 }): Promise<{
   reply: string;
-  analysisHighlight?: string;
+  analysisHighlight?: {
+    label: string;
+    totalTRY: number;
+    count: number;
+  };
   proposedExpenses: ExtractedExpense[];
 }> {
   const { apiKey, message, files, existingExpenses, existingTags } = params;
@@ -221,7 +225,14 @@ YETENEKLERİN:
             type: Type.OBJECT,
             properties: {
               reply: { type: Type.STRING },
-              analysisHighlight: { type: Type.STRING },
+              analysisHighlight: {
+                type: Type.OBJECT,
+                properties: {
+                  label: { type: Type.STRING },
+                  totalTRY: { type: Type.NUMBER },
+                  count: { type: Type.NUMBER },
+                },
+              },
               proposedExpenses: {
                 type: Type.ARRAY,
                 items: {
@@ -288,9 +299,18 @@ YETENEKLERİN:
         }
       );
 
+      const highlight =
+        parsed.analysisHighlight && typeof parsed.analysisHighlight === 'object'
+          ? {
+              label: String(parsed.analysisHighlight.label || ''),
+              totalTRY: Number(parsed.analysisHighlight.totalTRY || 0),
+              count: Number(parsed.analysisHighlight.count || 0),
+            }
+          : undefined;
+
       return {
         reply: String(parsed.reply || 'İşleminiz tamamlandı.'),
-        analysisHighlight: parsed.analysisHighlight ? String(parsed.analysisHighlight) : undefined,
+        analysisHighlight: highlight,
         proposedExpenses: proposed,
       };
     } catch (err) {

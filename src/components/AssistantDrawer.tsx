@@ -72,7 +72,14 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       const prepared = await Promise.all(
         Array.from(files).map((f) => prepareFileForGemini(f))
       );
-      setAttachments((prev) => [...prev, ...prepared]);
+      setAttachments((prev) => {
+        const existingKeys = new Set(prev.map((p) => `${p.name}_${p.sizeKB}`));
+        const fresh = prepared.filter((p) => !existingKeys.has(`${p.name}_${p.sizeKB}`));
+        return [...prev, ...fresh];
+      });
+      if (fileRef.current) {
+        fileRef.current.value = '';
+      }
     } catch {
       // ignore invalid file
     }
@@ -118,7 +125,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
       let chatData: {
         reply?: string;
-        analysisHighlight?: string;
+        analysisHighlight?: ChatMessage['analysisHighlight'];
         proposedExpenses?: ExtractedExpense[];
       } | null = null;
 
@@ -426,15 +433,35 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         {/* Alt Giriş Alanı */}
         <div className="p-4 border-t border-[#27272a] bg-[#121215]">
           {attachments.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {attachments.map((att, i) => (
-                <span
-                  key={i}
-                  className="text-[11px] font-mono bg-[#18181b] border border-[#27272a] px-2 py-0.5 rounded text-[#10b981]"
-                >
-                  {att.name}
-                </span>
-              ))}
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
+                {attachments.map((att, i) => (
+                  <span
+                    key={i}
+                    className="text-[11px] font-mono bg-[#18181b] border border-[#27272a] pl-2 pr-1.5 py-0.5 rounded text-[#10b981] flex items-center gap-1.5"
+                  >
+                    <span className="truncate max-w-[140px]">{att.name}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                      }
+                      aria-label={`Eki sil: ${att.name}`}
+                      title="Bu eki kaldır"
+                      className="p-0.5 text-[#71717a] hover:text-[#f43f5e] cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setAttachments([])}
+                className="text-[11px] text-[#a1a1aa] hover:text-[#f43f5e] underline transition-colors cursor-pointer"
+              >
+                Temizle
+              </button>
             </div>
           )}
 

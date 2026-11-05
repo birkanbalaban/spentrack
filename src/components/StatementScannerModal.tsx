@@ -7,6 +7,8 @@ import {
   Check,
   Loader2,
   Sparkles,
+  Trash2,
+  RotateCcw,
 } from 'lucide-react';
 import {
   Expense,
@@ -88,7 +90,44 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
     return () => window.removeEventListener('paste', handlePaste);
   }, [isOpen, existingExpenses]);
 
-  if (!isOpen) return null;
+  const handleRemoveAttachment = (indexToRemove: number) => {
+    setAttachments((prev) => prev.filter((_, idx) => idx !== indexToRemove));
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleClearAttachments = () => {
+    setAttachments([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleRemoveCandidate = (tempId: string) => {
+    setCandidates((prev) => prev.filter((c) => c.tempId !== tempId));
+  };
+
+  const handleClearCandidates = () => {
+    setCandidates([]);
+    setDetectedBank('');
+    setSummaryNote('');
+  };
+
+  const handleToggleAllCandidates = (selectAll: boolean) => {
+    setCandidates((prev) => prev.map((c) => ({ ...c, selected: selectAll })));
+  };
+
+  const handleResetAll = () => {
+    setAttachments([]);
+    setCandidates([]);
+    setDetectedBank('');
+    setSummaryNote('');
+    setError('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
   const handleFilesSelected = async (fileList: FileList | File[]) => {
     setError('');
@@ -97,7 +136,15 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
 
     try {
       const prepared = await Promise.all(arr.map((f) => prepareFileForGemini(f)));
-      setAttachments((prev) => [...prev, ...prepared]);
+      setAttachments((prev) => {
+        // Mükerrer dosya eklenmesini engelle
+        const existingKeys = new Set(prev.map((p) => `${p.name}_${p.sizeKB}`));
+        const fresh = prepared.filter((p) => !existingKeys.has(`${p.name}_${p.sizeKB}`));
+        return [...prev, ...fresh];
+      });
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Dosya hazırlanamadı.');
     }
@@ -293,6 +340,12 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
       );
       setAttachments([]);
       setCandidates([]);
+      setDetectedBank('');
+      setSummaryNote('');
+      setError('');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Toplu kayıt başarısız oldu.');
@@ -322,14 +375,27 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
               Görseller otomatik max 1600px JPEG (0.8) olarak sıkıştırılır; PDF ekstreler çoklu satır olarak taranır. Ctrl+V ile doğrudan yapıştırabilirsiniz.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Ekstre tarayıcıyı kapat"
-            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-[#27272a] cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {(attachments.length > 0 || candidates.length > 0) && (
+              <button
+                type="button"
+                onClick={handleResetAll}
+                title="Yüklenen dosyaları ve tespit listesini sıfırla"
+                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#a1a1aa] hover:text-[#f43f5e] hover:bg-[#27272a] border border-[#27272a] hover:border-[#f43f5e]/40 transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Tümünü Sıfırla</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Ekstre tarayıcıyı kapat"
+              className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-[#27272a] cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 flex-1 overflow-y-auto space-y-5 pr-1">
@@ -385,35 +451,71 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
             </div>
 
             {attachments.length > 0 && (
-              <div className="mt-4 pt-4 border-t border-[#27272a] flex flex-wrap items-center justify-between gap-3">
+              <div className="mt-4 pt-4 border-t border-[#27272a] space-y-3 text-left">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-medium text-[#f4f4f5] flex items-center gap-1.5">
+                    <span>Yüklenen Dosyalar ({attachments.length})</span>
+                    <span className="text-[11px] text-[#71717a] hidden sm:inline">
+                      · Yanlış yüklenenleri veya işi bitenleri sağdaki '✕' ile silebilirsiniz
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearAttachments}
+                    className="text-xs text-[#a1a1aa] hover:text-[#f43f5e] transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Yüklenen tüm görselleri kaldır"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Görselleri Temizle</span>
+                  </button>
+                </div>
+
                 <div className="flex flex-wrap gap-2">
                   {attachments.map((att, idx) => (
                     <div
                       key={idx}
-                      className="px-3 py-1.5 bg-[#18181b] border border-[#27272a] rounded-lg text-xs text-[#f4f4f5] flex items-center gap-2"
+                      className="px-3 py-1.5 bg-[#18181b] hover:bg-[#202025] border border-[#27272a] rounded-lg text-xs text-[#f4f4f5] flex items-center gap-2 transition-colors"
                     >
-                      <FileText className="w-3.5 h-3.5 text-[#10b981]" />
-                      <span className="truncate max-w-[180px]">{att.name}</span>
-                      <span className="font-mono text-[#71717a]">{att.sizeKB} KB</span>
+                      <FileText className="w-3.5 h-3.5 text-[#10b981] shrink-0" />
+                      <span className="truncate max-w-[170px]" title={att.name}>
+                        {att.name}
+                      </span>
+                      <span className="font-mono text-[11px] text-[#71717a] shrink-0">
+                        {att.sizeKB} KB
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveAttachment(idx);
+                        }}
+                        aria-label={`Dosyayı sil: ${att.name}`}
+                        title="Bu dosyayı kaldır"
+                        className="p-0.5 rounded text-[#71717a] hover:text-[#f43f5e] hover:bg-[#27272a] cursor-pointer transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   ))}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleAnalyzeWithGemini}
-                  disabled={analyzing}
-                  className="px-4 py-2 text-xs font-semibold bg-[#10b981] text-[#09090b] rounded-lg hover:bg-[#10b981]/90 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                >
-                  {analyzing ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      Gemini Analiz Ediyor...
-                    </>
-                  ) : (
-                    'Belgeyi Tara ve Ayıkla'
-                  )}
-                </button>
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    onClick={handleAnalyzeWithGemini}
+                    disabled={analyzing}
+                    className="px-4 py-2 text-xs font-semibold bg-[#10b981] text-[#09090b] rounded-lg hover:bg-[#10b981]/90 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  >
+                    {analyzing ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Gemini Analiz Ediyor...
+                      </>
+                    ) : (
+                      'Belgeyi Tara ve Ayıkla'
+                    )}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -423,10 +525,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
             <div className="space-y-3" data-testid="extracted-candidates-table">
               <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121215] border border-[#27272a] rounded-xl p-3.5">
                 <div className="text-xs space-y-0.5">
-                  <div className="font-semibold text-[#f4f4f5]">
-                    Tespit Edilen Harcamalar ({candidates.length} satır)
+                  <div className="font-semibold text-[#f4f4f5] flex items-center gap-2 flex-wrap">
+                    <span>Tespit Edilen Harcamalar ({candidates.length} satır)</span>
                     {detectedBank && (
-                      <span className="ml-2 text-[#10b981] font-mono">
+                      <span className="text-[#10b981] font-mono">
                         · {detectedBank}
                       </span>
                     )}
@@ -434,8 +536,27 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                   {summaryNote && <div className="text-[#a1a1aa]">{summaryNote}</div>}
                 </div>
 
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAllCandidates(selectedCount !== candidates.length)}
+                    className="px-2.5 py-1 text-xs font-medium bg-[#18181b] hover:bg-[#27272a] text-[#a1a1aa] hover:text-[#f4f4f5] border border-[#27272a] rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                  >
+                    {selectedCount === candidates.length ? 'Seçimi Kaldır' : 'Tümünü Seç'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearCandidates}
+                    className="px-2.5 py-1 text-xs font-medium bg-[#18181b] hover:bg-[#f43f5e]/15 text-[#a1a1aa] hover:text-[#f43f5e] border border-[#27272a] hover:border-[#f43f5e]/40 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Tespit edilen harcamaları sıfırla"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Tespitleri Sıfırla</span>
+                  </button>
+                </div>
+
                 {duplicateCount > 0 && (
-                  <div className="flex items-center gap-1.5 text-xs text-[#f59e0b] font-medium">
+                  <div className="w-full flex items-center gap-1.5 text-xs text-[#f59e0b] font-medium pt-1 border-t border-[#27272a]/40">
                     <AlertTriangle className="w-4 h-4 shrink-0" />
                     <span>
                       {duplicateCount} satır mevcut kayıtlarla eşleştiği için varsayılan olarak işaretsiz bırakıldı
@@ -455,6 +576,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                       <th className="py-1.5 px-2.5">Etiketler (#tag)</th>
                       <th className="py-1.5 px-2.5">Not / Taksit</th>
                       <th className="py-1.5 px-2.5 text-right">Tutar (TL)</th>
+                      <th className="py-1.5 px-2 w-8 text-center" title="Satırı kaldır">Sil</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#27272a]/60 text-xs leading-tight">
@@ -570,6 +692,17 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                             }`}
                           />
                         </td>
+                        <td className="py-1 px-2 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCandidate(row.tempId)}
+                            aria-label={`Satırı sil: ${row.title}`}
+                            title="Bu satırı listeden çıkar"
+                            className="p-1 rounded text-[#71717a] hover:text-[#f43f5e] hover:bg-[#27272a] cursor-pointer transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -580,11 +713,26 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         </div>
 
         {/* Alt Bar */}
-        <div className="pt-4 mt-4 border-t border-[#27272a] flex items-center justify-between gap-3 shrink-0">
-          <div className="text-xs text-[#a1a1aa] font-mono tabular-nums">
-            {candidates.length > 0
-              ? `${selectedCount} / ${candidates.length} satır eklenecek`
-              : 'Henüz satır ayrıştırılmadı'}
+        <div className="pt-4 mt-4 border-t border-[#27272a] flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div className="text-xs text-[#a1a1aa] font-mono tabular-nums flex items-center gap-3">
+            <span>
+              {candidates.length > 0
+                ? `${selectedCount} / ${candidates.length} satır eklenecek`
+                : attachments.length > 0
+                ? `${attachments.length} dosya yüklendi (taramaya hazır)`
+                : 'Henüz satır ayrıştırılmadı'}
+            </span>
+            {(attachments.length > 0 || candidates.length > 0) && (
+              <button
+                type="button"
+                onClick={handleResetAll}
+                className="text-xs text-[#71717a] hover:text-[#f43f5e] underline transition-colors flex items-center gap-1 cursor-pointer"
+                title="Tüm yüklenen dosyaları ve tespit edilen satırları temizle"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Tümünü Sıfırla</span>
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <button
