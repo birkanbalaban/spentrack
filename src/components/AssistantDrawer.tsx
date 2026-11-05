@@ -18,7 +18,11 @@ import {
 } from '../types';
 import { detectDuplicates, formatCurrency } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
-import { AccountApiKeyBox, sanitizeClientApiKey } from './AccountApiKeyBox';
+import {
+  AccountApiKeyBox,
+  sanitizeClientApiKey,
+  isValidGeminiApiKey,
+} from './AccountApiKeyBox';
 import { chatWithAssistantDirectClient } from '../utils/clientGeminiFallback';
 
 interface AssistantDrawerProps {
@@ -111,7 +115,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }));
 
     try {
-      if (activeKey && activeKey !== customApiKey && activeKey.startsWith('AIza')) {
+      if (activeKey && activeKey !== customApiKey && isValidGeminiApiKey(activeKey)) {
         onSaveApiKey(activeKey).catch(() => {});
       }
 
@@ -147,7 +151,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         }
         chatData = data;
       } catch (serverErr) {
-        if (activeKey && activeKey.startsWith('AIza')) {
+        if (activeKey && isValidGeminiApiKey(activeKey)) {
           chatData = await chatWithAssistantDirectClient({
             apiKey: activeKey,
             message: text,

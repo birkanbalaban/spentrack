@@ -24,7 +24,11 @@ import {
   parseTurkishAmount,
 } from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
-import { AccountApiKeyBox, sanitizeClientApiKey } from './AccountApiKeyBox';
+import {
+  AccountApiKeyBox,
+  sanitizeClientApiKey,
+  isValidGeminiApiKey,
+} from './AccountApiKeyBox';
 import { extractStatementDirectClient } from '../utils/clientGeminiFallback';
 
 interface StatementScannerModalProps {
@@ -166,7 +170,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
     }));
 
     try {
-      if (activeKey && activeKey !== customApiKey && activeKey.startsWith('AIza')) {
+      if (activeKey && activeKey !== customApiKey && isValidGeminiApiKey(activeKey)) {
         onSaveApiKey(activeKey).catch(() => {});
       }
 
@@ -200,7 +204,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         }
         extractedData = data;
       } catch (serverErr) {
-        if (activeKey && activeKey.startsWith('AIza')) {
+        if (activeKey && isValidGeminiApiKey(activeKey)) {
           extractedData = await extractStatementDirectClient({
             apiKey: activeKey,
             files: payloadFiles,
@@ -222,7 +226,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
       const rawMsg = err instanceof Error ? err.message : 'Analiz sırasında bir hata oluştu.';
       if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid')) {
         setError(
-          "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen AI Studio 'Settings > Secrets' panelinden GEMINI_API_KEY anahtarınızı kontrol edin veya aşağıdaki kutuya 'AIza...' ile başlayan geçerli bir Google AI Studio API anahtarı girip Kaydet'e basın."
+          "Tanımlı Gemini API anahtarı geçersiz (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden geçerli ('AIza...' veya 'AQ...' ile başlayan) anahtarınızı kontrol edin ve Kaydet'e basın."
         );
       } else {
         setError(rawMsg);
@@ -354,6 +358,19 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
   const selectedCount = candidates.filter((c) => c.selected).length;
   const duplicateCount = candidates.filter((c) => c.isDuplicate).length;
 
@@ -362,6 +379,11 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="scanner-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 overflow-y-auto"
     >
       <div className="w-full max-w-5xl bg-[#18181b] border border-[#27272a] rounded-xl p-6 shadow-2xl max-h-[90vh] flex flex-col">

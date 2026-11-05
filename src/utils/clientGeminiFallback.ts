@@ -11,7 +11,12 @@ import {
   parseTurkishAmount,
 } from './expenseLogic';
 
-const CLIENT_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+const CLIENT_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
+  'gemini-2.5-flash',
+];
 
 export async function extractStatementDirectClient(params: {
   apiKey: string;

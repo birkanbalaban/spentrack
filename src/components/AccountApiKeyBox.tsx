@@ -13,8 +13,27 @@ export function sanitizeClientApiKey(raw: string): string {
   const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
   if (aizaMatch) {
     cleaned = aizaMatch[0];
+  } else {
+    // Google AI Studio modern auth keys start with AQ... / AQ....
+    const aqMatch = cleaned.match(/AQ[0-9A-Za-z_.-]{20,}/);
+    if (aqMatch) {
+      cleaned = aqMatch[0];
+    }
   }
   return cleaned;
+}
+
+export function isValidGeminiApiKey(key: string): boolean {
+  if (!key || typeof key !== 'string') return false;
+  const trimmed = key.trim();
+  if (trimmed.length < 20) return false;
+  // Supports classic Google API keys ('AIza...') and modern Google AI Studio keys ('AQ...' / 'AQ....')
+  return (
+    trimmed.startsWith('AIza') ||
+    trimmed.startsWith('AQ') ||
+    /^AIza[0-9A-Za-z_-]{25,}$/.test(trimmed) ||
+    /^AQ[0-9A-Za-z_.-]{20,}$/.test(trimmed)
+  );
 }
 
 interface AccountApiKeyBoxProps {
@@ -53,10 +72,10 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
       setFeedback({ type: 'err', text: 'Lütfen geçerli bir Gemini API anahtarı girin.' });
       return;
     }
-    if (!cleaned.startsWith('AIza') || cleaned.length < 30) {
+    if (!isValidGeminiApiKey(cleaned)) {
       setFeedback({
         type: 'err',
-        text: "Geçersiz anahtar formatı. Google Gemini API anahtarları 'AIza' ile başlar (örn: AIzaSy...).",
+        text: "Geçersiz anahtar formatı. Google Gemini API anahtarları 'AIza' veya 'AQ' ile başlar (örn: AIzaSy... veya AQ...).",
       });
       return;
     }
@@ -143,7 +162,7 @@ export const AccountApiKeyBox: React.FC<AccountApiKeyBoxProps> = ({
                 handleSave();
               }
             }}
-            placeholder="AIzaSy..."
+            placeholder="AIzaSy... veya AQ..."
             className="w-full pl-3.5 pr-9 py-2 bg-[#09090b] border border-[#27272a] rounded-xl text-xs sm:text-sm font-mono text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
           />
           <button

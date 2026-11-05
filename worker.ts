@@ -101,6 +101,11 @@ function sanitizeGeminiApiKey(raw?: string | null): string | null {
   const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
   if (aizaMatch) {
     cleaned = aizaMatch[0];
+  } else {
+    const aqMatch = cleaned.match(/AQ[0-9A-Za-z_.-]{20,}/);
+    if (aqMatch) {
+      cleaned = aqMatch[0];
+    }
   }
 
   if (
@@ -184,7 +189,7 @@ function formatGeminiErrorMessage(err: unknown): { status: number; message: stri
     return {
       status: 400,
       message:
-        "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden yeni bir 'AIza...' anahtarı oluşturup eksiksiz kopyaladığınızdan emin olun.",
+        "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden geçerli ('AIza...' veya 'AQ...' ile başlayan) anahtarınızı kontrol edip eksiksiz kopyaladığınızdan emin olun.",
     };
   }
   return { status: 500, message: raw };
@@ -201,29 +206,18 @@ async function generateGeminiContentWithFallback(
   let lastError: unknown = null;
 
   for (const apiKey of candidateKeys) {
-    const isExternalAizaKey = apiKey.startsWith('AIza');
-
-    const clientConfigs = isExternalAizaKey
-      ? [
-          {
-            httpOptions: undefined,
-            models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'],
-          },
-          {
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-            models: ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'],
-          },
-        ]
-      : [
-          {
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-            models: ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'],
-          },
-          {
-            httpOptions: undefined,
-            models: ['gemini-2.5-flash', 'gemini-flash-latest'],
-          },
-        ];
+    // Both classic 'AIza...' and modern Google AI Studio 'AQ...' user keys
+    // must be called WITHOUT 'User-Agent: aistudio-build' first so they connect directly to Google GenAI.
+    const clientConfigs = [
+      {
+        httpOptions: undefined,
+        models: ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash'],
+      },
+      {
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        models: ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'],
+      },
+    ];
 
     for (const cfg of clientConfigs) {
       const ai = new GoogleGenAI(
