@@ -12,5 +12,12 @@
   },
   "vars": {
     "APP_NAME": "SpenTrack"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "spentrack-db",
+      "database_id": "c8cfb3bb-54da-4519-9286-35e7cb753abf"
+    }
+  ]
 }

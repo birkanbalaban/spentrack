@@ -505,6 +505,23 @@ async function verifyJwtWebCrypto(
 let schemaInitialized = false;
 const memoryExpenses = new Map<string, Record<string, unknown>[]>();
 
+function resolveD1Database(envObj: Record<string, unknown>): D1Database | undefined {
+  if (envObj.DB && typeof (envObj.DB as D1Database).prepare === 'function') {
+    return envObj.DB as D1Database;
+  }
+  for (const val of Object.values(envObj)) {
+    if (
+      val &&
+      typeof val === 'object' &&
+      typeof (val as D1Database).prepare === 'function' &&
+      typeof (val as D1Database).batch === 'function'
+    ) {
+      return val as D1Database;
+    }
+  }
+  return undefined;
+}
+
 async function ensureSchema(db?: D1Database): Promise<void> {
   if (!db || schemaInitialized) return;
   try {
@@ -516,6 +533,7 @@ async function ensureSchema(db?: D1Database): Promise<void> {
           name TEXT NOT NULL,
           avatar_url TEXT DEFAULT '',
           gemini_api_key TEXT DEFAULT '',
+          bot_api_key TEXT DEFAULT '',
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )`
@@ -546,6 +564,21 @@ async function ensureSchema(db?: D1Database): Promise<void> {
     } catch {
       // Column already exists
     }
+    try {
+      await db.prepare("ALTER TABLE expenses ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default_user'").run();
+    } catch {
+      // Column already exists
+    }
+    try {
+      await db.prepare("CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date DESC)").run();
+    } catch {
+      // Index already exists
+    }
+    try {
+      await db.prepare("CREATE INDEX IF NOT EXISTS idx_users_bot_api_key ON users(bot_api_key)").run();
+    } catch {
+      // Index already exists
+    }
     schemaInitialized = true;
   } catch {
     // ignore
@@ -556,20 +589,28 @@ export default {
   async fetch(request: Request, env: Env & { JWT_SECRET?: string }): Promise<Response> {
     const url = new URL(request.url);
     const jwtSecret = env.JWT_SECRET || WORKER_JWT_SECRET;
+    const detectedDb = resolveD1Database(env as unknown as Record<string, unknown>);
+    if (detectedDb && !env.DB) {
+      (env as { DB?: D1Database }).DB = detectedDb;
+    }
 
     let userId = request.headers.get('x-user-id') || 'default_user';
+    let userEmail = (request.headers.get('x-user-email') || '').trim().toLowerCase();
     const authHeader = request.headers.get('Authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const verified = await verifyJwtWebCrypto(authHeader.slice(7).trim(), jwtSecret);
       if (verified && typeof verified.sub === 'string' && verified.sub.trim()) {
         userId = verified.sub.trim();
       }
+      if (verified && typeof verified.email === 'string' && verified.email.trim()) {
+        userEmail = verified.email.trim().toLowerCase();
+      }
     }
 
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-user-id, x-custom-gemini-key',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-user-id, x-user-email, x-custom-gemini-key',
     };
 
     if (request.method === 'OPTIONS') {
@@ -1273,16 +1314,25 @@ export default {
       // GET /api/expenses
       if (url.pathname === '/api/expenses' && request.method === 'GET') {
         if (!env.DB) {
+          const byId = memoryExpenses.get(userId) || [];
+          const byEmail = userEmail ? memoryExpenses.get(userEmail) || [] : [];
+          const merged = [...byId];
+          const seen = new Set(byId.map((e) => String(e.id)));
+          for (const item of byEmail) {
+            if (!seen.has(String(item.id))) {
+              merged.push(item);
+            }
+          }
           return Response.json(
-            { expenses: memoryExpenses.get(userId) || [] },
+            { expenses: merged, storageMode: 'memory' },
             { headers: corsHeaders }
           );
         }
 
         const { results } = await env.DB.prepare(
-          'SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC, created_at DESC'
+          'SELECT * FROM expenses WHERE user_id = ? OR (? != "" AND LOWER(user_id) = ?) ORDER BY date DESC, created_at DESC'
         )
-          .bind(userId)
+          .bind(userId, userEmail, userEmail)
           .all();
 
         const mapped = results.map((r: Record<string, unknown>) => ({
@@ -1299,7 +1349,7 @@ export default {
           createdAt: r.created_at,
         }));
 
-        return Response.json({ expenses: mapped }, { headers: corsHeaders });
+        return Response.json({ expenses: mapped, storageMode: 'd1' }, { headers: corsHeaders });
       }
 
       // POST /api/expenses (Single)

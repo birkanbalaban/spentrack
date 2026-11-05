@@ -1149,9 +1149,12 @@ async function startServer() {
   app.get('/api/expenses', (req, res) => {
     try {
       const userId = getUserId(req);
+      const userEmail = String(req.headers['x-user-email'] || '').trim().toLowerCase();
       const rows = db
-        .prepare('SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC, created_at DESC')
-        .all(userId) as Record<string, unknown>[];
+        .prepare(
+          'SELECT * FROM expenses WHERE user_id = ? OR (? != "" AND LOWER(user_id) = ?) ORDER BY date DESC, created_at DESC'
+        )
+        .all(userId, userEmail, userEmail) as Record<string, unknown>[];
 
       const expenses = rows.map((r) => ({
         id: String(r.id),
@@ -1173,7 +1176,7 @@ async function startServer() {
         createdAt: String(r.created_at || ''),
       }));
 
-      res.json({ expenses });
+      res.json({ expenses, storageMode: 'd1' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Veritabanı okuma hatası';
       res.status(500).json({ error: msg });

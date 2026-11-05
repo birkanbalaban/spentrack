@@ -226,6 +226,8 @@ export default function App() {
   // Hesaba tanımlı Gemini API anahtarı (Tarayıcı localStorage yerine bulut kullanıcı hesabında tutulur)
   const [customApiKey, setCustomApiKey] = useState<string>('');
 
+  const [storageMode, setStorageMode] = useState<'d1' | 'memory' | null>(null);
+
   // Canlı Döviz Kuru: Frankfurter API
   useEffect(() => {
     let active = true;
@@ -251,39 +253,84 @@ export default function App() {
   }, []);
 
   const buildAuthHeaders = useCallback(
-    (activeUserId: string, token: string): Record<string, string> => {
+    (activeUserId: string, token: string, email?: string): Record<string, string> => {
       const headers: Record<string, string> = {
         'x-user-id': activeUserId,
       };
+      if (email || authUser?.email) {
+        headers['x-user-email'] = String(email || authUser?.email || '');
+      }
       if (token) {
         headers.Authorization = `Bearer ${token}`;
       }
       return headers;
     },
-    []
+    [authUser?.email]
   );
 
-  // Harcamaları Yükle (Authenticated kullanıcı için bulut veritabanından)
+  // Harcamaları Yükle (Authenticated kullanıcı için bulut veritabanından + yerel yedek birleştirme)
   const fetchExpenses = useCallback(
     async (activeUserId: string, token: string) => {
       setLoading(true);
+      const userCacheKey = `${LOCAL_STORAGE_EXPENSES_KEY}_${activeUserId}`;
       try {
         const res = await fetch('/api/expenses', {
           headers: buildAuthHeaders(activeUserId, token),
         });
         if (res.ok) {
           const data = await res.json();
-          const list: Expense[] = data.expenses || [];
-          setExpenses(list);
+          if (data.storageMode === 'd1' || data.storageMode === 'memory') {
+            setStorageMode(data.storageMode);
+          }
+          const serverList: Expense[] = data.expenses || [];
+
+          // Yerel önbellekte olup sunucuda henüz bulunmayan kayıtları koru ve sunucuya senkronize et
+          let localCached: Expense[] = [];
           try {
-            localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(list));
+            const rawLocal =
+              localStorage.getItem(userCacheKey) ||
+              localStorage.getItem(LOCAL_STORAGE_EXPENSES_KEY);
+            if (rawLocal) {
+              const parsed = JSON.parse(rawLocal);
+              if (Array.isArray(parsed)) {
+                localCached = parsed.filter((e) => e && e.id && !String(e.id).startsWith('demo-'));
+              }
+            }
+          } catch {
+            // ignore
+          }
+
+          const serverIds = new Set(serverList.map((e) => e.id));
+          const unsyncedLocal = localCached.filter((e) => !serverIds.has(e.id));
+
+          if (unsyncedLocal.length > 0) {
+            fetch('/api/expenses/batch', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...buildAuthHeaders(activeUserId, token),
+              },
+              body: JSON.stringify({ expenses: unsyncedLocal }),
+            }).catch(() => {});
+          }
+
+          const mergedList = [...serverList, ...unsyncedLocal].sort((a, b) =>
+            String(b.date || '').localeCompare(String(a.date || ''))
+          );
+
+          setExpenses(mergedList);
+          try {
+            localStorage.setItem(userCacheKey, JSON.stringify(mergedList));
+            localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(mergedList));
           } catch {
             // ignore
           }
         }
       } catch {
         try {
-          const cached = localStorage.getItem(LOCAL_STORAGE_EXPENSES_KEY);
+          const cached =
+            localStorage.getItem(userCacheKey) ||
+            localStorage.getItem(LOCAL_STORAGE_EXPENSES_KEY);
           if (cached) {
             setExpenses(JSON.parse(cached));
           }
@@ -497,12 +544,13 @@ export default function App() {
 
   // Tekil Harcama Kaydet / Güncelle
   const handleSaveManualExpense = async (payload: Omit<Expense, 'id'> & { id?: string }) => {
+    const id = payload.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newExp: Expense = {
+      ...payload,
+      id,
+    };
+
     if (isDemoMode || !authUser) {
-      const id = payload.id || `demo-${Date.now()}`;
-      const newExp: Expense = {
-        ...payload,
-        id,
-      };
       setExpenses((prev) => {
         if (payload.id) {
           return prev.map((e) => (e.id === payload.id ? newExp : e));
@@ -511,6 +559,20 @@ export default function App() {
       });
       return;
     }
+
+    const userCacheKey = `${LOCAL_STORAGE_EXPENSES_KEY}_${authUser.id}`;
+    setExpenses((prev) => {
+      const updated = payload.id
+        ? prev.map((e) => (e.id === payload.id ? newExp : e))
+        : [newExp, ...prev];
+      try {
+        localStorage.setItem(userCacheKey, JSON.stringify(updated));
+        localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
 
     const isEdit = Boolean(payload.id);
     const url = isEdit ? `/api/expenses/${payload.id}` : '/api/expenses';
@@ -522,7 +584,7 @@ export default function App() {
         'Content-Type': 'application/json',
         ...buildAuthHeaders(authUser.id, authToken),
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(newExp),
     });
 
     if (!res.ok) {
@@ -535,14 +597,27 @@ export default function App() {
 
   // Toplu Harcama Kaydet
   const handleBatchSaveExpenses = async (items: ExtractedExpense[]) => {
+    const created: Expense[] = items.map((item, idx) => ({
+      ...item,
+      id: (item as Expense).id || `batch-${Date.now()}-${idx}`,
+    }));
+
     if (isDemoMode || !authUser) {
-      const created: Expense[] = items.map((item, idx) => ({
-        ...item,
-        id: `demo-batch-${Date.now()}-${idx}`,
-      }));
       setExpenses((prev) => [...created, ...prev]);
       return;
     }
+
+    const userCacheKey = `${LOCAL_STORAGE_EXPENSES_KEY}_${authUser.id}`;
+    setExpenses((prev) => {
+      const updated = [...created, ...prev];
+      try {
+        localStorage.setItem(userCacheKey, JSON.stringify(updated));
+        localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
 
     const res = await fetch('/api/expenses/batch', {
       method: 'POST',
@@ -550,7 +625,7 @@ export default function App() {
         'Content-Type': 'application/json',
         ...buildAuthHeaders(authUser.id, authToken),
       },
-      body: JSON.stringify({ expenses: items }),
+      body: JSON.stringify({ expenses: created }),
     });
 
     if (!res.ok) {
@@ -569,7 +644,19 @@ export default function App() {
         headers: buildAuthHeaders(authUser.id, authToken),
       });
     }
-    setExpenses((prev) => prev.filter((e) => e.id !== id));
+    setExpenses((prev) => {
+      const updated = prev.filter((e) => e.id !== id);
+      if (authUser) {
+        const userCacheKey = `${LOCAL_STORAGE_EXPENSES_KEY}_${authUser.id}`;
+        try {
+          localStorage.setItem(userCacheKey, JSON.stringify(updated));
+          localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+      }
+      return updated;
+    });
   };
 
   const handleSyncGuestToCloud = async (): Promise<number> => {
@@ -729,6 +816,21 @@ export default function App() {
                 <LogOut className="w-3.5 h-3.5" />
                 <span>Demodan Çık</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {storageMode === 'memory' && !isDemoMode && (
+        <div className="bg-[#f59e0b]/10 border-b border-[#f59e0b]/30 px-4 sm:px-8 py-2.5">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-[#fcd34d]">
+            <div>
+              <strong className="font-semibold text-[#f59e0b]">Cloudflare D1 Veritabanı Bağlı Değil (Geçici Bellek Modu):</strong>{' '}
+              Bilgisayar ve telefonun birbirini görmesi için Cloudflare panelinden{' '}
+              <code className="font-mono bg-[#18181b] px-1.5 py-0.5 rounded text-[#f4f4f5]">
+                Workers &amp; Pages &gt; spentrack &gt; Settings &gt; Bindings &gt; Add &gt; D1 database
+              </code>{' '}
+              adımından veritabanınızı <code className="font-mono bg-[#18181b] px-1.5 py-0.5 rounded text-[#10b981]">DB</code> adıyla bağlayın (veya <code className="font-mono">wrangler.json</code> içine <code className="font-mono">d1_databases</code> ekleyin).
             </div>
           </div>
         </div>
