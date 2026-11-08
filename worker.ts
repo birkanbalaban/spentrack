@@ -3,7 +3,7 @@
  * Supports D1 db.batch() for multi-row statement & profile sync inserts,
  * CRUD endpoints, and server-side @google/genai Structured Outputs for extraction & chat.
  */
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   normalizeCategory,
   normalizeTagList,
@@ -206,41 +206,21 @@ async function generateGeminiContentWithFallback(
   let lastError: unknown = null;
 
   const ACTIVE_MODELS = [
-    'gemini-3.8-flash',
     'gemini-flash-latest',
+    'gemini-3.8-flash',
     'gemini-3.6-flash',
-    'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
-    'gemini-3-flash-preview',
-    'gemini-flash-lite-latest',
-    'gemini-4-argon',
-    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
   ];
 
   for (const apiKey of candidateKeys) {
-    // Supports:
-    // 1. Direct Gemini Developer API (generativelanguage.googleapis.com) for AIza... and AQ... keys
-    // 2. Vertex AI Express Mode (aiplatform.googleapis.com via vertexai: true) for AQ... service keys
-    // 3. AI Studio Build internal proxy (User-Agent: aistudio-build)
     const clientConfigs: Array<{
       vertexai?: boolean;
       httpOptions?: { headers: Record<string, string> };
-      models: string[];
-    }> = [
-      {
-        httpOptions: undefined,
-        models: ACTIVE_MODELS,
-      },
-      {
-        vertexai: true,
-        httpOptions: undefined,
-        models: ACTIVE_MODELS,
-      },
-      {
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        models: ACTIVE_MODELS,
-      },
-    ];
+    }> = [{ httpOptions: undefined }];
+    if (apiKey.startsWith('AQ')) {
+      clientConfigs.push({ vertexai: true, httpOptions: undefined });
+    }
 
     for (const cfg of clientConfigs) {
       const ai = new GoogleGenAI({
@@ -249,8 +229,9 @@ async function generateGeminiContentWithFallback(
         ...(cfg.httpOptions ? { httpOptions: cfg.httpOptions } : {}),
       });
 
-      for (const modelName of cfg.models) {
+      for (const modelName of ACTIVE_MODELS) {
         try {
+          const isGemini3 = modelName.includes('gemini-3') || modelName.includes('gemini-4');
           const response = await ai.models.generateContent({
             model: modelName,
             contents: { parts: params.parts },
@@ -258,6 +239,7 @@ async function generateGeminiContentWithFallback(
               systemInstruction: params.systemInstruction,
               responseMimeType: 'application/json',
               responseSchema: params.responseSchema,
+              ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
             },
           });
 

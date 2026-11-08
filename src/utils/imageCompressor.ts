@@ -22,7 +22,7 @@ export async function prepareFileForGemini(file: File): Promise<PreparedAttachme
   }
 
   if (file.type.startsWith('image/')) {
-    return compressImageOnCanvas(file, 1600, 0.8);
+    return compressImageOnCanvas(file, 1280, 0.75);
   }
 
   throw new Error('Desteklenmeyen dosya formatı. Lütfen görsel (PNG/JPEG/WebP) veya PDF yükleyin.');

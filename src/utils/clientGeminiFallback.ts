@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   Expense,
   ExpenseCategory,
@@ -12,14 +12,11 @@ import {
 } from './expenseLogic';
 
 export const ACTIVE_GEMINI_MODELS = [
-  'gemini-3.8-flash',
   'gemini-flash-latest',
+  'gemini-3.8-flash',
   'gemini-3.6-flash',
-  'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
-  'gemini-3-flash-preview',
-  'gemini-flash-lite-latest',
-  'gemini-2.5-flash',
+  'gemini-3.5-flash-lite',
 ];
 
 function createClientCandidates(apiKey: string): GoogleGenAI[] {
@@ -94,50 +91,52 @@ KRİTİK TÜRKİYE BANKACILIK KURALLARI:
   for (const ai of clients) {
     for (const model of ACTIVE_GEMINI_MODELS) {
       try {
+          const isGemini3 = model.includes('gemini-3') || model.includes('gemini-4');
         const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              detectedBank: { type: Type.STRING },
-              summaryNote: { type: Type.STRING },
-              expenses: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    currency: { type: Type.STRING },
-                    amountInTRY: { type: Type.NUMBER },
-                    category: { type: Type.STRING },
-                    tags: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                detectedBank: { type: Type.STRING },
+                summaryNote: { type: Type.STRING },
+                expenses: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      title: { type: Type.STRING },
+                      amount: { type: Type.NUMBER },
+                      currency: { type: Type.STRING },
+                      amountInTRY: { type: Type.NUMBER },
+                      category: { type: Type.STRING },
+                      tags: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      date: { type: Type.STRING },
+                      notes: { type: Type.STRING },
                     },
-                    date: { type: Type.STRING },
-                    notes: { type: Type.STRING },
+                    required: [
+                      'title',
+                      'amount',
+                      'currency',
+                      'amountInTRY',
+                      'category',
+                      'tags',
+                      'date',
+                    ],
                   },
-                  required: [
-                    'title',
-                    'amount',
-                    'currency',
-                    'amountInTRY',
-                    'category',
-                    'tags',
-                    'date',
-                  ],
                 },
               },
+              required: ['expenses'],
             },
-            required: ['expenses'],
+            ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
           },
-        },
-      });
+        });
 
       const rawText = response.text || '{}';
       const parsed = JSON.parse(rawText);
@@ -246,6 +245,7 @@ YETENEKLERİN:
   for (const ai of clients) {
     for (const model of ACTIVE_GEMINI_MODELS) {
       try {
+        const isGemini3 = model.includes('gemini-3') || model.includes('gemini-4');
         const response = await ai.models.generateContent({
           model,
           contents: [{ role: 'user', parts }],
@@ -295,6 +295,7 @@ YETENEKLERİN:
               },
               required: ['reply'],
             },
+            ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
           },
         });
 
