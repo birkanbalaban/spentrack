@@ -188,22 +188,43 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         expenses?: ExtractedExpense[];
       } | null = null;
 
-      try {
-        const res = await fetch('/api/ai/extract', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            files: payloadFiles,
-            existingTags,
-          }),
-        });
+      const fetchTimeoutMs = 16000;
+      const reqStart = performance.now();
 
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Ekstre analiz edilemedi.');
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
+        try {
+          const res = await fetch('/api/ai/extract', {
+            method: 'POST',
+            headers,
+            signal: controller.signal,
+            body: JSON.stringify({
+              files: payloadFiles,
+              existingTags,
+            }),
+          });
+
+          const data = await res.json();
+          const elapsedMs = Math.round(performance.now() - reqStart);
+          const serverMs = res.headers.get('X-Response-Time-Ms') || '-';
+          console.info(
+            `[SpenTrack Perf] /api/ai/extract status=${res.status} clientMs=${elapsedMs}ms serverMs=${serverMs}ms files=${payloadFiles.length}`
+          );
+
+          if (!res.ok) {
+            throw new Error(data.error || 'Ekstre analiz edilemedi.');
+          }
+          extractedData = data;
+        } finally {
+          clearTimeout(timer);
         }
-        extractedData = data;
       } catch (serverErr) {
+        const elapsedMs = Math.round(performance.now() - reqStart);
+        console.warn(
+          `[SpenTrack Perf] /api/ai/extract failed/aborted after ${elapsedMs}ms:`,
+          serverErr instanceof Error ? serverErr.message : String(serverErr)
+        );
         if (activeKey && isValidGeminiApiKey(activeKey)) {
           extractedData = await extractStatementDirectClient({
             apiKey: activeKey,

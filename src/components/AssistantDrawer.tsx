@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Send,
@@ -16,7 +16,13 @@ import {
   ExtractedExpense,
   MarkedCandidate,
 } from '../types';
-import { detectDuplicates, formatCurrency } from '../utils/expenseLogic';
+import {
+  buildDraftExpenseFromPrompt,
+  detectDuplicates,
+  formatCurrency,
+  parseInstantAssistantMessage,
+  parseTurkishAmount,
+} from '../utils/expenseLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
 import {
   AccountApiKeyBox,
@@ -64,9 +70,36 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMeta, setLoadingMeta] = useState<{
+    startedAt: number;
+    elapsedSec: number;
+    fileSummary: string;
+    keyStatus: string;
+    stageLabel: string;
+    pendingText: string;
+  } | null>(null);
   const [showKeyConfig, setShowKeyConfig] = useState(false);
   const [liveDraftKey, setLiveDraftKey] = useState<string>(customApiKey || '');
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const activeAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!loading || !loadingMeta) return;
+    const interval = setInterval(() => {
+      setLoadingMeta((prev) => {
+        if (!prev) return null;
+        const elapsedSec = Math.round(((Date.now() - prev.startedAt) / 1000) * 10) / 10;
+        let stageLabel = prev.stageLabel;
+        if (elapsedSec >= 2.0 && elapsedSec < 5.0 && prev.fileSummary) {
+          stageLabel = 'Görsel OCR okunuyor (Hızlı Mod · Düşünme Kapalı)...';
+        } else if (elapsedSec >= 5.0) {
+          stageLabel = 'Yedek Gemini kanalı devrede, yanıt bekleniyor...';
+        }
+        return { ...prev, elapsedSec, stageLabel };
+      });
+    }, 200);
+    return () => clearInterval(interval);
+  }, [loading]);
 
   if (!isOpen) return null;
 
@@ -89,25 +122,101 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }
   };
 
+  const handleManualDraftFallback = (promptText: string, reasonNote?: string) => {
+    if (activeAbortRef.current) {
+      activeAbortRef.current.abort();
+      activeAbortRef.current = null;
+    }
+    setLoading(false);
+    setLoadingMeta(null);
+
+    const draft = buildDraftExpenseFromPrompt(promptText);
+    const marked = detectDuplicates([draft], expenses);
+    const assistantMsg: ChatMessage = {
+      id: `ast_${Date.now() + 2}`,
+      role: 'assistant',
+      content:
+        reasonNote ||
+        `Mesajınızdaki başlık ("${draft.title}") ve etiketleri (${draft.tags.join(' ')}) hazır hale getirdim. Aşağıdaki kutudan tutarı girip anında kaydedebilirsiniz:`,
+      timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+      proposedExpenses: marked,
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+  };
+
   const sendMessage = async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if (!text && attachments.length === 0) return;
 
+    const currentAttachments = [...attachments];
+    const totalKB = currentAttachments.reduce((s, a) => s + (a.sizeKB || 0), 0);
     const userMsg: ChatMessage = {
       id: `user_${Date.now()}`,
       role: 'user',
-      content: text || `${attachments.length} dosya gönderildi`,
-      attachmentNames: attachments.map((a) => a.name),
+      content: text || `${currentAttachments.length} dosya gönderildi`,
+      attachmentNames: currentAttachments.map((a) => `${a.name} (${a.sizeKB} KB)`),
       timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
     if (!overrideText) setInput('');
-    const currentAttachments = [...attachments];
     setAttachments([]);
-    setLoading(true);
 
     const activeKey = sanitizeClientApiKey(liveDraftKey || customApiKey);
+    if (activeKey && activeKey !== customApiKey && isValidGeminiApiKey(activeKey)) {
+      onSaveApiKey(activeKey).catch(() => {});
+    }
+
+    // Mesajda zaten tutar + açıklama yazılmışsa (dosya eki olsa bile veya olmasa da) 0ms'de anlık çözümle!
+    if (text) {
+      const instantStart = performance.now();
+      const instant = parseInstantAssistantMessage(text, expenses);
+      if (instant.handled && (currentAttachments.length === 0 || instant.proposedExpenses.length > 0)) {
+        const instantMs = Math.round((performance.now() - instantStart) * 100) / 100;
+        console.info(
+          `[SpenTrack Perf] Client Assistant instant-nlp resolved in ${instantMs}ms (proposed=${instant.proposedExpenses.length})`
+        );
+        const markedProposed: MarkedCandidate[] =
+          instant.proposedExpenses.length > 0
+            ? detectDuplicates(instant.proposedExpenses, expenses)
+            : [];
+        const assistantMsg: ChatMessage = {
+          id: `ast_${Date.now() + 1}`,
+          role: 'assistant',
+          content: instant.reply,
+          timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+          proposedExpenses: markedProposed.length > 0 ? markedProposed : undefined,
+          analysisHighlight: instant.analysisHighlight,
+        };
+        setMessages((prev) => [...prev, userMsg, assistantMsg]);
+        return;
+      }
+    }
+
+    setMessages((prev) => [...prev, userMsg]);
+    const hasValidClientKey = Boolean(activeKey && isValidGeminiApiKey(activeKey));
+    const keyStatusText = hasValidClientKey
+      ? `API Anahtarı Bağlı (${activeKey.slice(0, 4)}...${activeKey.slice(-3)})`
+      : 'Sunucu API Anahtarı';
+    const fileSummaryText =
+      currentAttachments.length > 0
+        ? `${currentAttachments.map((a) => a.name).join(', ')} (${totalKB} KB sıkıştırıldı ✓)`
+        : '';
+
+    const abortCtrl = new AbortController();
+    activeAbortRef.current = abortCtrl;
+    setLoading(true);
+    setLoadingMeta({
+      startedAt: Date.now(),
+      elapsedSec: 0,
+      fileSummary: fileSummaryText,
+      keyStatus: keyStatusText,
+      stageLabel:
+        currentAttachments.length > 0
+          ? 'Görsel Gemini 2.5 Flash’a gönderiliyor (Düşünme Modu Kapalı)...'
+          : 'Gemini yanıtı bekleniyor...',
+      pendingText: text,
+    });
+
     const payloadFiles = currentAttachments.map((a) => ({
       name: a.name,
       mimeType: a.mimeType,
@@ -115,10 +224,6 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }));
 
     try {
-      if (activeKey && activeKey !== customApiKey && isValidGeminiApiKey(activeKey)) {
-        onSaveApiKey(activeKey).catch(() => {});
-      }
-
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...authHeaders,
@@ -133,35 +238,76 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         proposedExpenses?: ExtractedExpense[];
       } | null = null;
 
-      try {
-        const res = await fetch('/api/ai/chat', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            message: text,
-            files: payloadFiles,
-            existingExpenses: expenses,
-            existingTags,
-          }),
+      const fetchTimeoutMs = payloadFiles.length > 0 ? 9000 : 6000;
+      const reqStart = performance.now();
+
+      const serverCall = async () => {
+        const timer = setTimeout(() => abortCtrl.abort(), fetchTimeoutMs);
+        try {
+          const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers,
+            signal: abortCtrl.signal,
+            body: JSON.stringify({
+              message: text,
+              files: payloadFiles,
+              // Görsel yüklenirken mevcut harcama listesini göndermeyerek yükü ve süreyi %85 azaltıyoruz
+              existingExpenses: payloadFiles.length > 0 ? [] : expenses,
+              existingTags: existingTags.slice(0, 30),
+            }),
+          });
+
+          const data = await res.json();
+          const elapsedMs = Math.round(performance.now() - reqStart);
+          const serverMs = res.headers.get('X-Response-Time-Ms') || '-';
+          console.info(
+            `[SpenTrack Perf] /api/ai/chat status=${res.status} clientMs=${elapsedMs}ms serverMs=${serverMs}ms`
+          );
+
+          if (!res.ok) {
+            throw new Error(data.error || 'Asistan yanıt veremedi.');
+          }
+          return data;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
+      if (hasValidClientKey) {
+        // Kullanıcının API anahtarı tanımlıysa: Sunucu 1.8 sn içinde dönmezse doğrudan istemci Gemini (thinkingBudget: 0) paralel devreye girer, hangisi önce biterse anında yanıt döner!
+        const hedgedClientCall = new Promise<{
+          reply: string;
+          analysisHighlight?: ChatMessage['analysisHighlight'];
+          proposedExpenses: ExtractedExpense[];
+        }>((resolve, reject) => {
+          const hedgeTimer = setTimeout(() => {
+            if (abortCtrl.signal.aborted) {
+              reject(new Error('İptal edildi'));
+              return;
+            }
+            chatWithAssistantDirectClient({
+              apiKey: activeKey,
+              message: text,
+              files: payloadFiles,
+              existingExpenses: payloadFiles.length > 0 ? [] : expenses,
+              existingTags: existingTags.slice(0, 30),
+            })
+              .then(resolve)
+              .catch(reject);
+          }, 1800);
+
+          abortCtrl.signal.addEventListener('abort', () => clearTimeout(hedgeTimer), { once: true });
         });
 
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Asistan yanıt veremedi.');
+        try {
+          chatData = await Promise.any([serverCall(), hedgedClientCall]);
+        } catch (aggregateErr) {
+          // Her ikisi de hata verdiyse doğrudan son bir istemci denemesi veya hata fırlat
+          const errors = (aggregateErr as AggregateError)?.errors || [aggregateErr];
+          throw errors[0] || new Error('Gemini API yanıt vermedi.');
         }
-        chatData = data;
-      } catch (serverErr) {
-        if (activeKey && isValidGeminiApiKey(activeKey)) {
-          chatData = await chatWithAssistantDirectClient({
-            apiKey: activeKey,
-            message: text,
-            files: payloadFiles,
-            existingExpenses: expenses,
-            existingTags,
-          });
-        } else {
-          throw serverErr;
-        }
+      } else {
+        chatData = await serverCall();
       }
 
       const rawProposed: ExtractedExpense[] = chatData?.proposedExpenses || [];
@@ -179,17 +325,39 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err_${Date.now()}`,
-          role: 'assistant',
-          content: err instanceof Error ? err.message : 'Bir bağlantı hatası oluştu.',
-          timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-        },
-      ]);
+      if (abortCtrl.signal.aborted && !loading) {
+        return;
+      }
+      const errMsg = err instanceof Error ? err.message : 'Bir bağlantı hatası oluştu.';
+      // Eğer görsel veya metin gönderilmişse ve API zaman aşımına/hataya düştüyse, kullanıcının yazdığı başlık ve etiketi kaybetmeden hemen tutar girilebilir kart sun!
+      if (text || payloadFiles.length > 0) {
+        const draft = buildDraftExpenseFromPrompt(text);
+        const marked = detectDuplicates([draft], expenses);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `err_${Date.now()}`,
+            role: 'assistant',
+            content: `⚠️ Görsel okuma gecikti veya API yanıt vermedi (${errMsg}). Mesajınızdaki "${draft.title}" ve ${draft.tags.join(' ')} bilgilerini hazırladım; sadece tutarı yazıp hemen kaydedebilirsiniz:`,
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            proposedExpenses: marked,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `err_${Date.now()}`,
+            role: 'assistant',
+            content: errMsg,
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
+      }
     } finally {
+      activeAbortRef.current = null;
       setLoading(false);
+      setLoadingMeta(null);
     }
   };
 
@@ -207,9 +375,26 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     );
   };
 
+  const updateProposedCandidateAmount = (msgId: string, tempId: string, rawVal: string) => {
+    const parsed = parseTurkishAmount(rawVal);
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId || !m.proposedExpenses) return m;
+        return {
+          ...m,
+          proposedExpenses: m.proposedExpenses.map((c) =>
+            c.tempId === tempId
+              ? { ...c, amount: parsed, amountInTRY: parsed, selected: true }
+              : c
+          ),
+        };
+      })
+    );
+  };
+
   const handleSaveProposed = async (msg: ChatMessage) => {
     if (!msg.proposedExpenses) return;
-    const selected = msg.proposedExpenses.filter((c) => c.selected);
+    const selected = msg.proposedExpenses.filter((c) => c.selected && c.amount !== 0);
     if (selected.length === 0) return;
 
     await onBatchSave(
@@ -366,11 +551,11 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
                     <div className="divide-y divide-[#27272a]/60">
                       {msg.proposedExpenses.map((cand) => (
-                        <label
+                        <div
                           key={cand.tempId}
-                          className="py-2 flex items-start justify-between gap-2 cursor-pointer"
+                          className="py-2 flex items-start justify-between gap-2"
                         >
-                          <div className="flex items-start gap-2">
+                          <label className="flex items-start gap-2 cursor-pointer flex-1 min-w-0">
                             <input
                               type="checkbox"
                               checked={cand.selected}
@@ -378,8 +563,8 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                               onChange={() => toggleProposedCandidate(msg.id, cand.tempId)}
                               className="mt-0.5 rounded border-[#27272a] bg-[#09090b] text-[#10b981]"
                             />
-                            <div>
-                              <div className="font-medium text-[#f4f4f5]">{cand.title}</div>
+                            <div className="min-w-0">
+                              <div className="font-medium text-[#f4f4f5] break-words">{cand.title}</div>
                               <div className="text-[11px] text-[#a1a1aa]">
                                 {cand.category} ·{' '}
                                 <span className="font-mono text-[#10b981]">
@@ -393,11 +578,34 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                                 </div>
                               )}
                             </div>
+                          </label>
+                          <div className="shrink-0 flex flex-col items-end gap-1">
+                            {msg.savedSuccess ? (
+                              <div className="font-mono tabular-nums font-semibold text-[#f4f4f5]">
+                                {formatCurrency(cand.amountInTRY, displayCurrency, rates)}
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  aria-label={`Tutar (${cand.title})`}
+                                  placeholder="Tutar girin"
+                                  defaultValue={cand.amount !== 0 ? String(cand.amount) : ''}
+                                  onChange={(e) =>
+                                    updateProposedCandidateAmount(msg.id, cand.tempId, e.target.value)
+                                  }
+                                  className={`w-24 text-right px-2 py-1 rounded bg-[#09090b] border font-mono tabular-nums text-xs font-semibold focus:outline-none ${
+                                    cand.amount === 0
+                                      ? 'border-[#f59e0b] text-[#f59e0b] placeholder-[#f59e0b]/70'
+                                      : 'border-[#27272a] text-[#f4f4f5] focus:border-[#10b981]'
+                                  }`}
+                                />
+                                <span className="text-[11px] font-mono text-[#a1a1aa]">₺</span>
+                              </div>
+                            )}
                           </div>
-                          <div className="font-mono tabular-nums font-semibold text-[#f4f4f5] shrink-0">
-                            {formatCurrency(cand.amountInTRY, displayCurrency, rates)}
-                          </div>
-                        </label>
+                        </div>
                       ))}
                     </div>
 
@@ -409,12 +617,18 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     ) : (
                       <button
                         type="button"
+                        disabled={
+                          msg.proposedExpenses.filter((c) => c.selected && c.amount !== 0).length === 0
+                        }
                         onClick={() => handleSaveProposed(msg)}
-                        className="w-full py-2 text-xs font-semibold bg-[#10b981] text-[#09090b] rounded-lg hover:bg-[#10b981]/90 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                        className="w-full py-2 text-xs font-semibold bg-[#10b981] text-[#09090b] rounded-lg hover:bg-[#10b981]/90 disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                       >
                         <Check className="w-3.5 h-3.5" />
-                        Harcamaları Kaydet (
-                        {msg.proposedExpenses.filter((c) => c.selected).length})
+                        {msg.proposedExpenses.some((c) => c.selected && c.amount === 0)
+                          ? 'Lütfen Yukarıdaki Kutuya Tutarı Yazın'
+                          : `Harcamaları Kaydet (${
+                              msg.proposedExpenses.filter((c) => c.selected && c.amount !== 0).length
+                            })`}
                       </button>
                     )}
                   </div>
@@ -427,9 +641,56 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           ))}
 
           {loading && (
-            <div className="flex items-center gap-2 text-xs text-[#a1a1aa] p-2">
-              <Loader2 className="w-4 h-4 animate-spin text-[#10b981]" />
-              <span>SpenTrack Asistan hesaplıyor...</span>
+            <div className="rounded-xl bg-[#121215] border border-[#27272a] p-3.5 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[#f4f4f5] font-medium">
+                  <Loader2 className="w-4 h-4 animate-spin text-[#10b981] shrink-0" />
+                  <span>{loadingMeta?.stageLabel || 'SpenTrack Asistan hesaplıyor...'}</span>
+                </div>
+                <span className="font-mono text-[11px] text-[#10b981] tabular-nums shrink-0">
+                  {loadingMeta ? `${loadingMeta.elapsedSec.toFixed(1)} sn` : ''}
+                </span>
+              </div>
+
+              {loadingMeta && (
+                <div className="pl-6 space-y-1 text-[11px] text-[#a1a1aa] font-mono">
+                  {loadingMeta.fileSummary && (
+                    <div>📎 Görsel: {loadingMeta.fileSummary}</div>
+                  )}
+                  <div>🔑 Bağlantı: {loadingMeta.keyStatus}</div>
+                </div>
+              )}
+
+              <div className="pl-6 pt-1 flex flex-wrap items-center gap-2">
+                {loadingMeta?.pendingText && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleManualDraftFallback(
+                        loadingMeta.pendingText,
+                        '⚡ Görsel okuma beklenmeden başlık ve etiketleriniz hazırlandı. Sadece tutarı yazıp hemen kaydedebilirsiniz:'
+                      )
+                    }
+                    className="px-2.5 py-1 rounded-md bg-[#10b981]/15 border border-[#10b981]/50 text-[#10b981] hover:bg-[#10b981]/25 text-[11px] font-medium cursor-pointer transition-colors"
+                  >
+                    ⚡ Beklemeden Tutarı Elle Gir
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeAbortRef.current) {
+                      activeAbortRef.current.abort();
+                      activeAbortRef.current = null;
+                    }
+                    setLoading(false);
+                    setLoadingMeta(null);
+                  }}
+                  className="px-2.5 py-1 rounded-md bg-[#18181b] border border-[#27272a] text-[#a1a1aa] hover:text-[#f43f5e] text-[11px] cursor-pointer transition-colors"
+                >
+                  İptal Et
+                </button>
+              </div>
             </div>
           )}
         </div>

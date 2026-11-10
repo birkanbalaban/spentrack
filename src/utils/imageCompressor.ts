@@ -22,7 +22,7 @@ export async function prepareFileForGemini(file: File): Promise<PreparedAttachme
   }
 
   if (file.type.startsWith('image/')) {
-    return compressImageOnCanvas(file, 1280, 0.75);
+    return compressImageOnCanvas(file, 1024, 0.68);
   }
 
   throw new Error('Desteklenmeyen dosya formatı. Lütfen görsel (PNG/JPEG/WebP) veya PDF yükleyin.');
@@ -43,15 +43,20 @@ function fileToBase64(file: File): Promise<string> {
 
 function compressImageOnCanvas(
   file: File,
-  maxDimension = 1600,
-  quality = 0.8
+  maxDimension = 1024,
+  quality = 0.68
 ): Promise<PreparedAttachment> {
   return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error('Görsel sıkıştırma zaman aşımına uğradı. Lütfen farklı bir ekran görüntüsü deneyin.'));
+    }, 6000);
+
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = String(reader.result || '');
       const img = new Image();
       img.onload = () => {
+        clearTimeout(timeoutId);
         let { width, height } = img;
         if (width > maxDimension || height > maxDimension) {
           if (width >= height) {
@@ -84,13 +89,19 @@ function compressImageOnCanvas(
           mimeType: 'image/jpeg',
           data: base64Data,
           previewUrl: jpegDataUrl,
-          sizeKB: Math.round((base64Data.length * 3) / 4 / 1024),
+          sizeKB: Math.max(1, Math.round((base64Data.length * 3) / 4 / 1024)),
         });
       };
-      img.onerror = () => reject(new Error('Görsel işlenemedi.'));
+      img.onerror = () => {
+        clearTimeout(timeoutId);
+        reject(new Error('Görsel işlenemedi.'));
+      };
       img.src = dataUrl;
     };
-    reader.onerror = () => reject(new Error('Görsel okunamadı.'));
+    reader.onerror = () => {
+      clearTimeout(timeoutId);
+      reject(new Error('Görsel okunamadı.'));
+    };
     reader.readAsDataURL(file);
   });
 }

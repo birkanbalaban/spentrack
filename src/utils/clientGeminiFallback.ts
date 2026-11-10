@@ -6,31 +6,78 @@ import {
   FIXED_CATEGORIES,
 } from '../types';
 import {
+  buildDraftExpenseFromPrompt,
   normalizeCategory,
   normalizeTagList,
+  parseInstantAssistantMessage,
   parseTurkishAmount,
 } from './expenseLogic';
 
 export const ACTIVE_GEMINI_MODELS = [
+  'gemini-2.5-flash',
   'gemini-flash-latest',
   'gemini-3.8-flash',
-  'gemini-3.6-flash',
+  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
 ];
 
-function createClientCandidates(apiKey: string): GoogleGenAI[] {
+const CLIENT_TEXT_TIMEOUT_MS = 5000;
+const CLIENT_MEDIA_TIMEOUT_MS = 7500;
+const CLIENT_TOTAL_BUDGET_MS = 13000;
+
+function getFastThinkingConfig(modelName: string): Record<string, unknown> {
+  if (modelName.startsWith('gemini-2.5')) {
+    return { thinkingConfig: { thinkingBudget: 0 } };
+  }
+  if (modelName === 'gemini-3.8-flash' || modelName === 'gemini-3-flash-preview') {
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+  }
+  return {};
+}
+
+async function callClientGeminiWithTimeout<T>(
+  task: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`GEMINI_TIMEOUT: ${label} (${timeoutMs}ms aşıldı)`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([task(controller.signal), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function createClientCandidates(apiKey: string): Array<{ ai: GoogleGenAI; mode: 'vertex' | 'aistudio'; models: string[] }> {
   const trimmed = apiKey.trim();
-  // AQ... keys can be either Gemini Developer API keys or Vertex AI Express Mode keys
   if (trimmed.startsWith('AQ')) {
     return [
-      new GoogleGenAI({ apiKey: trimmed }),
-      new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
+      {
+        ai: new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
+        mode: 'vertex',
+        models: ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash'],
+      },
+      {
+        ai: new GoogleGenAI({ apiKey: trimmed }),
+        mode: 'aistudio',
+        models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash'],
+      },
     ];
   }
   return [
-    new GoogleGenAI({ apiKey: trimmed }),
-    new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
+    {
+      ai: new GoogleGenAI({ apiKey: trimmed }),
+      mode: 'aistudio',
+      models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'],
+    },
   ];
 }
 
@@ -44,7 +91,7 @@ export async function extractStatementDirectClient(params: {
   expenses: ExtractedExpense[];
 }> {
   const { apiKey, files, existingTags } = params;
-  const clients = createClientCandidates(apiKey);
+  const candidates = createClientCandidates(apiKey);
   const todayISO = new Date().toISOString().split('T')[0];
 
   const systemInstruction = `Sen Türkiye finans ve bankacılık ekstreleri konusunda uzman bir Muhasebe & Harcama Ayrıştırma Yapay Zekasısın.
@@ -87,89 +134,108 @@ KRİTİK TÜRKİYE BANKACILIK KURALLARI:
     });
   }
 
+  const totalStart = Date.now();
   let lastError: unknown = null;
-  for (const ai of clients) {
-    for (const model of ACTIVE_GEMINI_MODELS) {
+  for (const { ai, mode, models } of candidates) {
+    for (const model of models) {
+      const elapsedTotal = Date.now() - totalStart;
+      const remainingBudget = CLIENT_TOTAL_BUDGET_MS - elapsedTotal;
+      if (remainingBudget < 1200) {
+        console.warn(`[SpenTrack Perf] Client extract budget exhausted (${elapsedTotal}ms).`);
+        break;
+      }
+      const attemptTimeout = Math.min(CLIENT_MEDIA_TIMEOUT_MS, remainingBudget);
+      const attemptStart = Date.now();
       try {
-          const isGemini3 = model.includes('gemini-3') || model.includes('gemini-4');
-        const response = await ai.models.generateContent({
-          model,
-          contents: [{ role: 'user', parts }],
-          config: {
-            systemInstruction,
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                detectedBank: { type: Type.STRING },
-                summaryNote: { type: Type.STRING },
-                expenses: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      title: { type: Type.STRING },
-                      amount: { type: Type.NUMBER },
-                      currency: { type: Type.STRING },
-                      amountInTRY: { type: Type.NUMBER },
-                      category: { type: Type.STRING },
-                      tags: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
+        const response = await callClientGeminiWithTimeout(
+          (signal) =>
+            ai.models.generateContent({
+              model,
+              contents: [{ role: 'user', parts }],
+              config: {
+                ...getFastThinkingConfig(model),
+                abortSignal: signal,
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    detectedBank: { type: Type.STRING },
+                    summaryNote: { type: Type.STRING },
+                    expenses: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          title: { type: Type.STRING },
+                          amount: { type: Type.NUMBER },
+                          currency: { type: Type.STRING },
+                          amountInTRY: { type: Type.NUMBER },
+                          category: { type: Type.STRING },
+                          tags: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                          date: { type: Type.STRING },
+                          notes: { type: Type.STRING },
+                        },
+                        required: [
+                          'title',
+                          'amount',
+                          'currency',
+                          'amountInTRY',
+                          'category',
+                          'tags',
+                          'date',
+                        ],
                       },
-                      date: { type: Type.STRING },
-                      notes: { type: Type.STRING },
                     },
-                    required: [
-                      'title',
-                      'amount',
-                      'currency',
-                      'amountInTRY',
-                      'category',
-                      'tags',
-                      'date',
-                    ],
                   },
+                  required: ['expenses'],
                 },
               },
-              required: ['expenses'],
-            },
-            ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
-          },
-        });
+            }),
+          attemptTimeout,
+          `client/extract:${mode}/${model}`
+        );
 
-      const rawText = response.text || '{}';
-      const parsed = JSON.parse(rawText);
-      const normalized: ExtractedExpense[] = (parsed.expenses || []).map(
-        (item: Record<string, unknown>) => {
-          const amt =
-            typeof item.amount === 'number'
-              ? item.amount
-              : parseTurkishAmount(String(item.amount || 0));
-          const amtTRY =
-            typeof item.amountInTRY === 'number'
-              ? item.amountInTRY
-              : parseTurkishAmount(String(item.amountInTRY || amt));
-          const rawCurr = String(item.currency || 'TRY').toUpperCase();
-          const curr = (['TRY', 'USD', 'EUR', 'GBP'].includes(rawCurr)
-            ? rawCurr
-            : 'TRY') as ExtractedExpense['currency'];
+        const attemptMs = Date.now() - attemptStart;
+        console.info(
+          `[SpenTrack Perf] Client Gemini OK | op=extract | mode=${mode} | model=${model} | attemptMs=${attemptMs}ms | totalMs=${Date.now() - totalStart}ms`
+        );
 
-          return {
-            title: String(item.title || 'İsimsiz Harcama').trim(),
-            amount: amt,
-            currency: curr,
-            amountInTRY: amtTRY || amt,
-            category: normalizeCategory(String(item.category || 'Diğer')) as ExpenseCategory,
-            tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
-            date:
-              typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
-                ? item.date
-                : todayISO,
-            notes: String(item.notes || '').trim(),
-          };
-        }
-      );
+        const rawText = response.text || '{}';
+        const parsed = JSON.parse(rawText);
+        const normalized: ExtractedExpense[] = (parsed.expenses || []).map(
+          (item: Record<string, unknown>) => {
+            const amt =
+              typeof item.amount === 'number'
+                ? item.amount
+                : parseTurkishAmount(String(item.amount || 0));
+            const amtTRY =
+              typeof item.amountInTRY === 'number'
+                ? item.amountInTRY
+                : parseTurkishAmount(String(item.amountInTRY || amt));
+            const rawCurr = String(item.currency || 'TRY').toUpperCase();
+            const curr = (['TRY', 'USD', 'EUR', 'GBP'].includes(rawCurr)
+              ? rawCurr
+              : 'TRY') as ExtractedExpense['currency'];
+
+            return {
+              title: String(item.title || 'İsimsiz Harcama').trim(),
+              amount: amt,
+              currency: curr,
+              amountInTRY: amtTRY || amt,
+              category: normalizeCategory(String(item.category || 'Diğer')) as ExpenseCategory,
+              tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
+              date:
+                typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
+                  ? item.date
+                  : todayISO,
+              notes: String(item.notes || '').trim(),
+            };
+          }
+        );
 
         return {
           detectedBank: String(parsed.detectedBank || ''),
@@ -178,8 +244,20 @@ KRİTİK TÜRKİYE BANKACILIK KURALLARI:
         };
       } catch (err) {
         lastError = err;
+        const attemptMs = Date.now() - attemptStart;
         const msg = err instanceof Error ? err.message : String(err || '');
-        if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+        const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
+        console.warn(
+          `[SpenTrack Perf] Client Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=extract | mode=${mode} | model=${model} | attemptMs=${attemptMs}ms | reason=${msg.slice(0, 120)}`
+        );
+        if (
+          msg.includes('API_KEY_INVALID') ||
+          msg.includes('API key not valid') ||
+          msg.includes('UNAUTHENTICATED') ||
+          msg.includes('PERMISSION_DENIED') ||
+          msg.includes('401') ||
+          msg.includes('403')
+        ) {
           break;
         }
       }
@@ -205,32 +283,56 @@ export async function chatWithAssistantDirectClient(params: {
   proposedExpenses: ExtractedExpense[];
 }> {
   const { apiKey, message, files, existingExpenses, existingTags } = params;
-  const clients = createClientCandidates(apiKey);
   const todayISO = new Date().toISOString().split('T')[0];
 
-  const compactExpenses = existingExpenses.slice(0, 180).map((e) => ({
-    title: e.title,
-    amountInTRY: e.amountInTRY,
-    category: e.category,
-    tags: e.tags,
-    date: e.date,
-  }));
+  if (files.length === 0 && message.trim()) {
+    const instant = parseInstantAssistantMessage(message, existingExpenses, todayISO);
+    if (instant.handled) {
+      return {
+        reply: instant.reply,
+        analysisHighlight: instant.analysisHighlight,
+        proposedExpenses: instant.proposedExpenses,
+      };
+    }
+  }
 
-  const systemInstruction = `Sen "SpenTrack Finansal Asistanı"sın. Kullanıcının kişisel harcamalarını takip etmesine, doğal dille harcama eklemesine ve mevcut harcamalarını analiz etmesine yardımcı olursun.
+  const candidates = createClientCandidates(apiKey);
+
+  const systemInstruction =
+    files.length > 0
+      ? `Sen "SpenTrack" hızlı fiş/dekont/ekstre okuyucususun. Bugünün tarihi: ${todayISO}.
+Görseldeki harcama tutarını ve tarihini hızlıca çıkar. Kullanıcı mesajında özel bir başlık (örn: site yönetimi) veya #etiket (örn: #aidat) belirttiyse doğrudan uygula.
+Sadece şu 8 kategoriden birini seç: ${FIXED_CATEGORIES.join(', ')}`
+      : `Sen "SpenTrack Finansal Asistanı"sın. Kullanıcının kişisel harcamalarını takip etmesine, doğal dille harcama eklemesine ve mevcut harcamalarını analiz etmesine yardımcı olursun.
 Bugünün tarihi: ${todayISO}.
 
 YETENEKLERİN:
 1. DOĞAL DİLLE VEYA DOSYADAN HARCAMA EKLEME:
    - Kullanıcı "Bugün Migros'tan 850 TL market alışverişi yaptım, Kuveyt Türk Sağlam Kart ile ödedim" gibi bir mesaj yazarsa veya fiş/ekstre yüklerse, bunları "proposedExpenses" dizisine ekle.
 2. HARCAMA ANALİZİ VE SORU-CEVAP:
-   - Kullanıcının mevcut harcama listesi (özet): ${JSON.stringify(compactExpenses)}
+   - Kullanıcının mevcut harcama listesi (özet): ${JSON.stringify(
+     existingExpenses.slice(0, 120).map((e) => ({
+       title: e.title,
+       amountInTRY: e.amountInTRY,
+       category: e.category,
+       tags: e.tags,
+       date: e.date,
+     }))
+   )}
    - Kullanıcının mevcut etiket havuzu: ${JSON.stringify(existingTags)}
 3. KATEGORİLER:
    - Sadece şu 8 kategoriden birini kullan: ${FIXED_CATEGORIES.join(', ')}`;
 
   const parts: Array<
     { text: string } | { inlineData: { mimeType: string; data: string } }
-  > = [{ text: message || 'Eklenen dosyaları analiz et ve harcamaları çıkar.' }];
+  > = [
+    {
+      text:
+        files.length > 0
+          ? `Kullanıcı notu: "${message || 'Görseldeki harcamaları çıkar.'}". Mevcut etiketler: ${existingTags.slice(0, 30).join(', ')}. Görseldeki harcamayı ve tutarı ayıkla.`
+          : message || 'Eklenen dosyaları analiz et ve harcamaları çıkar.',
+    },
+  ];
 
   for (const file of files) {
     parts.push({
@@ -241,66 +343,91 @@ YETENEKLERİN:
     });
   }
 
+  const totalStart = Date.now();
+  const baseTimeout = files.length > 0 ? CLIENT_MEDIA_TIMEOUT_MS : CLIENT_TEXT_TIMEOUT_MS;
   let lastError: unknown = null;
-  for (const ai of clients) {
-    for (const model of ACTIVE_GEMINI_MODELS) {
+  for (const { ai, mode, models } of candidates) {
+    for (const model of models) {
+      const elapsedTotal = Date.now() - totalStart;
+      const remainingBudget = CLIENT_TOTAL_BUDGET_MS - elapsedTotal;
+      if (remainingBudget < 1200) {
+        console.warn(`[SpenTrack Perf] Client chat budget exhausted (${elapsedTotal}ms).`);
+        break;
+      }
+      const attemptTimeout = Math.min(baseTimeout, remainingBudget);
+      const attemptStart = Date.now();
       try {
-        const isGemini3 = model.includes('gemini-3') || model.includes('gemini-4');
-        const response = await ai.models.generateContent({
-          model,
-          contents: [{ role: 'user', parts }],
-          config: {
-            systemInstruction,
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                reply: { type: Type.STRING },
-                analysisHighlight: {
+        const response = await callClientGeminiWithTimeout(
+          (signal) =>
+            ai.models.generateContent({
+              model,
+              contents: [{ role: 'user', parts }],
+              config: {
+                ...getFastThinkingConfig(model),
+                abortSignal: signal,
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
                   type: Type.OBJECT,
                   properties: {
-                    label: { type: Type.STRING },
-                    totalTRY: { type: Type.NUMBER },
-                    count: { type: Type.NUMBER },
-                  },
-                },
-                proposedExpenses: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      title: { type: Type.STRING },
-                      amount: { type: Type.NUMBER },
-                      currency: { type: Type.STRING },
-                      amountInTRY: { type: Type.NUMBER },
-                      category: { type: Type.STRING },
-                      tags: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
+                    reply: { type: Type.STRING },
+                    analysisHighlight: {
+                      type: Type.OBJECT,
+                      properties: {
+                        label: { type: Type.STRING },
+                        totalTRY: { type: Type.NUMBER },
+                        count: { type: Type.NUMBER },
                       },
-                      date: { type: Type.STRING },
-                      notes: { type: Type.STRING },
                     },
-                    required: [
-                      'title',
-                      'amount',
-                      'currency',
-                      'amountInTRY',
-                      'category',
-                      'tags',
-                      'date',
-                    ],
+                    proposedExpenses: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          title: { type: Type.STRING },
+                          amount: { type: Type.NUMBER },
+                          currency: { type: Type.STRING },
+                          amountInTRY: { type: Type.NUMBER },
+                          category: { type: Type.STRING },
+                          tags: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                          date: { type: Type.STRING },
+                          notes: { type: Type.STRING },
+                        },
+                        required: [
+                          'title',
+                          'amount',
+                          'currency',
+                          'amountInTRY',
+                          'category',
+                          'tags',
+                          'date',
+                        ],
+                      },
+                    },
                   },
+                  required: ['reply'],
                 },
               },
-              required: ['reply'],
-            },
-            ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
-          },
-        });
+            }),
+          attemptTimeout,
+          `client/chat:${mode}/${model}`
+        );
+
+        const attemptMs = Date.now() - attemptStart;
+        console.info(
+          `[SpenTrack Perf] Client Gemini OK | op=chat | mode=${mode} | model=${model} | attemptMs=${attemptMs}ms | totalMs=${Date.now() - totalStart}ms`
+        );
 
         const parsed = JSON.parse(response.text || '{}');
-        const proposed: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
+        const userDraft =
+          files.length > 0 && message.trim() ? buildDraftExpenseFromPrompt(message, todayISO) : null;
+        const rawList: Record<string, unknown>[] = Array.isArray(parsed.proposedExpenses)
+          ? parsed.proposedExpenses
+          : [];
+        const proposed: ExtractedExpense[] = rawList.map(
           (item: Record<string, unknown>) => {
             const amt =
               typeof item.amount === 'number'
@@ -315,13 +442,28 @@ YETENEKLERİN:
               ? rawCurr
               : 'TRY') as ExtractedExpense['currency'];
 
+            const rawTitle = String(item.title || '').trim();
+            const finalTitle =
+              userDraft && rawList.length === 1 && userDraft.title !== 'Görsel Harcaması'
+                ? userDraft.title
+                : rawTitle || userDraft?.title || 'Harcama';
+            const mergedTags = normalizeTagList([
+              ...(Array.isArray(item.tags) ? (item.tags as string[]) : []),
+              ...(userDraft ? userDraft.tags.filter((t) => t !== '#genel') : []),
+            ]);
+            const finalCategory = (
+              userDraft && userDraft.category !== 'Diğer'
+                ? userDraft.category
+                : normalizeCategory(String(item.category || finalTitle || 'Diğer'))
+            ) as ExpenseCategory;
+
             return {
-              title: String(item.title || 'Harcama').trim(),
+              title: finalTitle,
               amount: amt,
               currency: curr,
               amountInTRY: amtTRY || amt,
-              category: normalizeCategory(String(item.category || 'Diğer')) as ExpenseCategory,
-              tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
+              category: finalCategory,
+              tags: mergedTags.length > 0 ? mergedTags : ['#genel'],
               date:
                 typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
                   ? item.date
@@ -347,8 +489,20 @@ YETENEKLERİN:
         };
       } catch (err) {
         lastError = err;
+        const attemptMs = Date.now() - attemptStart;
         const msg = err instanceof Error ? err.message : String(err || '');
-        if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+        const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
+        console.warn(
+          `[SpenTrack Perf] Client Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=chat | mode=${mode} | model=${model} | attemptMs=${attemptMs}ms | reason=${msg.slice(0, 120)}`
+        );
+        if (
+          msg.includes('API_KEY_INVALID') ||
+          msg.includes('API key not valid') ||
+          msg.includes('UNAUTHENTICATED') ||
+          msg.includes('PERMISSION_DENIED') ||
+          msg.includes('401') ||
+          msg.includes('403')
+        ) {
           break;
         }
       }
@@ -357,3 +511,4 @@ YETENEKLERİN:
 
   throw lastError instanceof Error ? lastError : new Error('Asistan yanıt veremedi.');
 }
+

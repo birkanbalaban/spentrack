@@ -104,7 +104,7 @@ export function normalizeCategory(raw: string): ExpenseCategory {
   if (/market|gida|migros|bim|a101|sok|carrefour|file|kasap|manav/.test(lower)) return 'Market';
   if (/yeme|icme|kahve|restoran|kafe|cafe|starbucks|yemek|getiryemek|trendyolyemek/.test(lower)) return 'Yeme-İçme';
   if (/ulasim|taksi|uber|marti|benzin|akaryakit|opet|shell|petrol|bilet|ucak|otobus|metro|istanbulkart/.test(lower)) return 'Ulaşım';
-  if (/fatura|abonelik|netflix|spotify|youtube|icloud|elektrik|su|dogalgaz|internet|turkcell|vodafone|telekom/.test(lower)) return 'Fatura & Abonelik';
+  if (/fatura|abonelik|aidat|site\s*y[oö]netim|apartman|kira|netflix|spotify|youtube|icloud|elektrik|su|dogalgaz|internet|turkcell|vodafone|telekom/.test(lower)) return 'Fatura & Abonelik';
   if (/alisveris|giyim|elektronik|amazon|hepsiburada|trendyol|zara|ikea|boyner/.test(lower)) return 'Alışveriş';
   if (/eglence|sinema|konser|oyun|steam|playstation|tiyatro|etkinlik/.test(lower)) return 'Eğlence';
   if (/saglik|eczane|hastane|doktor|ilac|dis|optik/.test(lower)) return 'Sağlık';
@@ -501,3 +501,525 @@ export function parseCSVToExpenses(csvText: string): ExtractedExpense[] {
   }
   return results;
 }
+
+export interface InstantAssistantResult {
+  handled: boolean;
+  reply: string;
+  proposedExpenses: ExtractedExpense[];
+  analysisHighlight?: {
+    label: string;
+    totalTRY: number;
+    count: number;
+  };
+}
+
+const TURKISH_LOWER_MAP: Record<string, string> = {
+  İ: 'i',
+  I: 'ı',
+  Ç: 'ç',
+  Ğ: 'ğ',
+  Ö: 'ö',
+  Ş: 'ş',
+  Ü: 'ü',
+};
+
+function toTurkishLower(str: string): string {
+  return String(str || '')
+    .replace(/[İIÇĞÖŞÜ]/g, (ch) => TURKISH_LOWER_MAP[ch] || ch)
+    .toLowerCase();
+}
+
+function toAsciiLower(str: string): string {
+  return toTurkishLower(str)
+    .replace(/ç/g, 'c')
+    .replace(/ğ/g, 'g')
+    .replace(/ı/g, 'i')
+    .replace(/ö/g, 'o')
+    .replace(/ş/g, 's')
+    .replace(/ü/g, 'u');
+}
+
+function capitalizeTurkishWords(str: string): string {
+  return str
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      const first = word.charAt(0);
+      const upperFirst = first === 'i' ? 'İ' : first === 'ı' ? 'I' : first.toUpperCase();
+      return upperFirst + toTurkishLower(word.slice(1));
+    })
+    .join(' ');
+}
+
+function extractBankTagsFromText(text: string): string[] {
+  const ascii = toAsciiLower(text);
+  const tags: string[] = [];
+  if (/saglam\s*kart|saglamkart/.test(ascii)) tags.push('#saglamkart');
+  if (/kuveyt\s*turk|kuveytturk/.test(ascii)) tags.push('#kuveytturk');
+  if (/yapi\s*kredi|yapikredi|world\s*kart|worldcard|\bworld\b/.test(ascii)) tags.push('#yapikredi');
+  if (/garanti|bonus/.test(ascii)) tags.push('#garanti');
+  if (/is\s*bankasi|isbankasi|maximum/.test(ascii)) tags.push('#isbankasi');
+  if (/akbank|axess/.test(ascii)) tags.push('#akbank');
+  if (/ziraat|bankkart/.test(ascii)) tags.push('#ziraat');
+  if (/qnb|finansbank|cardfinans/.test(ascii)) tags.push('#qnb');
+  if (/enpara/.test(ascii)) tags.push('#enpara');
+  if (/vakifbank/.test(ascii)) tags.push('#vakifbank');
+  if (/halkbank|paraf/.test(ascii)) tags.push('#halkbank');
+  if (/denizbank/.test(ascii)) tags.push('#denizbank');
+  if (/teb\b/.test(ascii)) tags.push('#teb');
+  if (/papara/.test(ascii)) tags.push('#papara');
+  if (/nakit/.test(ascii)) tags.push('#nakit');
+  return tags;
+}
+
+/**
+ * Doğal dilde yazılan harcama ekleme komutlarını ("420 tl yemeksepeti yapıkredi kredi kartı ekle",
+ * "Bugün Sağlam Kart ile 220 TL kahve, 1450 TL market harcadım") ve harcama analiz sorularını
+ * ("#yapikredi veya dışarıda yemeye ne kadar harcadım?") sıfır gecikmeyle (anlık) çözümler.
+ */
+export function parseInstantAssistantMessage(
+  message: string,
+  existingExpenses: Array<{
+    title: string;
+    amount: number;
+    amountInTRY: number;
+    category: string;
+    tags: string[];
+    date: string;
+  }>,
+  todayISO?: string
+): InstantAssistantResult {
+  const rawMessage = String(message || '').trim().replace(/^[\s+?"'“”]+|[\s"'“”]+$/g, '');
+  const today = todayISO || new Date().toISOString().slice(0, 10);
+
+  if (!rawMessage) {
+    return {
+      handled: false,
+      reply: '',
+      proposedExpenses: [],
+    };
+  }
+
+  const lower = toTurkishLower(rawMessage);
+  const ascii = toAsciiLower(rawMessage);
+
+  const hasAddVerb = /\b(ekle|kaydet|yaz|harcadim|odedim|aldim|verdim|yaptim|tuttu|cekildi)\b/.test(ascii);
+  const isQuestion =
+    !hasAddVerb &&
+    (/ne\s*kadar|kac\s*tl|kac\s*lira|toplam|analiz|ozet|en\s*cok|neler|listele/.test(ascii) ||
+      rawMessage.includes('?'));
+
+  const detectedBankTags = extractBankTagsFromText(rawMessage);
+  const explicitHashTags = (rawMessage.match(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g) || []).map((t) =>
+    normalizeTag(t)
+  );
+
+  if (isQuestion) {
+    const normalizedQueryTags = Array.from(
+      new Set([...explicitHashTags, ...detectedBankTags].filter(Boolean))
+    );
+
+    let matchedCategory: ExpenseCategory | null = null;
+    if (/disarida\s*yeme|yeme|icme|kahve|restoran|kafe|yemek/.test(ascii)) matchedCategory = 'Yeme-İçme';
+    else if (/market|gida|mutfak|migros|bim|a101/.test(ascii)) matchedCategory = 'Market';
+    else if (/ulasim|akaryakit|benzin|taksi|otobus|metro/.test(ascii)) matchedCategory = 'Ulaşım';
+    else if (/fatura|abonelik|netflix|internet|elektrik|su|dogalgaz/.test(ascii))
+      matchedCategory = 'Fatura & Abonelik';
+    else if (/alisveris|giyim|elektronik/.test(ascii)) matchedCategory = 'Alışveriş';
+    else if (/eglence|sinema|oyun|konser/.test(ascii)) matchedCategory = 'Eğlence';
+    else if (/saglik|eczane|hastane|ilac/.test(ascii)) matchedCategory = 'Sağlık';
+
+    const filtered = existingExpenses.filter((e) => {
+      const itemTags = (e.tags || []).map((x) => normalizeTag(x));
+      const tagHit =
+        normalizedQueryTags.length > 0 &&
+        normalizedQueryTags.some((qt) => itemTags.includes(qt));
+      const catHit = matchedCategory && e.category === matchedCategory;
+      if (normalizedQueryTags.length > 0 && matchedCategory) return tagHit || catHit;
+      if (normalizedQueryTags.length > 0) return tagHit;
+      if (matchedCategory) return Boolean(catHit);
+      return true;
+    });
+
+    const totalTRY =
+      Math.round(filtered.reduce((sum, item) => sum + Number(item.amountInTRY || 0), 0) * 100) / 100;
+    const labelParts: string[] = [];
+    if (normalizedQueryTags.length > 0) labelParts.push(normalizedQueryTags.join(', '));
+    if (matchedCategory) labelParts.push(matchedCategory);
+    const label = labelParts.length > 0 ? labelParts.join(' / ') : 'Tüm Harcamalar';
+
+    const formattedTotal = new Intl.NumberFormat('tr-TR', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(totalTRY);
+
+    return {
+      handled: true,
+      reply: `${label} kapsamında toplam ${filtered.length} işlem bulundu. İadeler düşüldükten sonra net harcama tutarınız ${formattedTotal} ₺'dir.`,
+      proposedExpenses: [],
+      analysisHighlight: {
+        label,
+        totalTRY,
+        count: filtered.length,
+      },
+    };
+  }
+
+  // Harcama ekleme ifadelerini virgül, noktalı virgül veya "ve" bağlacına göre ayır
+  const clauses = rawMessage
+    .split(/\s*(?:[,;]+|\bve\b)\s*/i)
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  const proposed: ExtractedExpense[] = [];
+
+  let messageDate = today;
+  if (/\bdün\b|\bdun\b/i.test(lower)) {
+    const d = new Date(`${today}T12:00:00Z`);
+    if (!Number.isNaN(d.getTime())) {
+      d.setUTCDate(d.getUTCDate() - 1);
+      messageDate = d.toISOString().slice(0, 10);
+    }
+  }
+
+  for (const clause of clauses) {
+    const clauseAscii = toAsciiLower(clause);
+
+    // Taksit tespiti (örn: "3 taksit", "2/6 taksit") — tutar eşleşmesiyle karışmaması için önce ayıkla
+    let installmentNote = '';
+    let clauseWithoutInstallment = clause;
+    const slashInstallment = clause.match(/\b(\d{1,2}\s*\/\s*\d{1,2})\s*(?:taksit(?:li|le)?)?\b/i);
+    const countInstallment = clause.match(/\b(\d{1,2})\s*taksit(?:li|le)?\b/i);
+    if (slashInstallment) {
+      installmentNote = `${slashInstallment[1].replace(/\s+/g, '')} Taksit`;
+      clauseWithoutInstallment = clauseWithoutInstallment.replace(slashInstallment[0], ' ');
+    } else if (countInstallment) {
+      installmentNote = `1/${countInstallment[1]} Taksit`;
+      clauseWithoutInstallment = clauseWithoutInstallment.replace(countInstallment[0], ' ');
+    }
+
+    // Tutar ve para birimi tespiti
+    const amountRegex =
+      /(?:^|\s)(-?\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|-?\d+(?:[.,]\d{1,2})?)\s*(tl|₺|try|lira|türk\s*lirası|turk\s*lirasi|usd|\$|dolar|eur|€|euro|gbp|£|sterlin)?(?=\s|$)/i;
+    const amountMatch = clauseWithoutInstallment.match(amountRegex);
+    if (!amountMatch) continue;
+
+    const rawNum = parseTurkishAmount(amountMatch[1]);
+    if (!rawNum || rawNum === 0) continue;
+
+    const unitRaw = toAsciiLower(amountMatch[2] || '');
+    let currency: CurrencyCode = 'TRY';
+    let rate = 1;
+    if (unitRaw === 'usd' || unitRaw === '$' || unitRaw === 'dolar') {
+      currency = 'USD';
+      rate = 36.25;
+    } else if (unitRaw === 'eur' || unitRaw === '€' || unitRaw === 'euro') {
+      currency = 'EUR';
+      rate = 37.85;
+    } else if (unitRaw === 'gbp' || unitRaw === '£' || unitRaw === 'sterlin') {
+      currency = 'GBP';
+      rate = 45.5;
+    }
+
+    const isRefund = /\b(iade|iptal|geri\s*odeme)\b/i.test(clauseAscii) || rawNum < 0;
+    const finalAmount = isRefund ? -Math.abs(rawNum) : Math.abs(rawNum);
+    const finalAmountTRY = Math.round(finalAmount * rate * 100) / 100;
+
+    const clauseHashtags = (clause.match(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g) || []).map((t) =>
+      normalizeTag(t)
+    );
+    const clauseBankTags = extractBankTagsFromText(clause);
+    const combinedBankTags = Array.from(new Set([...detectedBankTags, ...clauseBankTags]));
+
+    // Başlıktan tutarı, etiketleri, banka/kart isimlerini ve eylem kelimelerini temizle
+    let cleanDesc = toTurkishLower(clauseWithoutInstallment)
+      .replace(toTurkishLower(amountMatch[0]), ' ')
+      .replace(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g, ' ');
+
+    const stripPhrases = [
+      'kuveyt türk',
+      'kuveyt turk',
+      'kuveyttürk',
+      'kuveytturk',
+      'sağlam kart',
+      'saglam kart',
+      'sağlamkart',
+      'saglamkart',
+      'yapı kredi',
+      'yapi kredi',
+      'yapıkredi',
+      'yapikredi',
+      'world kart',
+      'worldcard',
+      'world',
+      'garanti bbva',
+      'garanti bonus',
+      'garanti',
+      'bonus kart',
+      'bonus',
+      'iş bankası',
+      'is bankasi',
+      'işbankası',
+      'isbankasi',
+      'maximum kart',
+      'maximum',
+      'ziraat bankası',
+      'ziraat bankasi',
+      'ziraat',
+      'bankkart',
+      'qnb finansbank',
+      'finansbank',
+      'qnb',
+      'cardfinans',
+      'akbank',
+      'axess',
+      'enpara',
+      'vakıfbank',
+      'vakifbank',
+      'halkbank',
+      'paraf',
+      'denizbank',
+      'teb',
+      'papara',
+      'nakit',
+      'kredi kartıyla',
+      'kredi kartiyla',
+      'kredi kartı',
+      'kredi karti',
+      'kredikartı',
+      'kredikarti',
+      'banka kartı',
+      'banka karti',
+      'kartıyla',
+      'kartiyla',
+      'kartla',
+      'kartı',
+      'karti',
+      'karttan',
+      'kart',
+      'kredi',
+      'bugün',
+      'bugun',
+      'dün',
+      'dun',
+      'az önce',
+      'az once',
+      'bu sabah',
+      'bu akşam',
+      'bu aksam',
+      'ekler misin',
+      'kaydeder misin',
+      'ekleyelim',
+      'kaydedelim',
+      'yazalım',
+      'yazalim',
+      'ekle',
+      'kaydet',
+      'yaz',
+      'gir',
+      'işle',
+      'isle',
+      'harcadım',
+      'harcadim',
+      'harcaması',
+      'harcamasi',
+      'harcama',
+      'ödedim',
+      'odedim',
+      'ödeme',
+      'odeme',
+      'aldım',
+      'aldim',
+      'yaptım',
+      'yaptim',
+      'verdim',
+      'tuttu',
+      'çekildi',
+      'cekildi',
+      'iade',
+      'iptal',
+      'türk lirası',
+      'turk lirasi',
+      'tl',
+      'try',
+      'lira',
+      'usd',
+      'dolar',
+      'eur',
+      'euro',
+      'gbp',
+      'sterlin',
+      'ile',
+      'için',
+      'icin',
+      'üzerinden',
+      'uzerinden',
+      'olarak',
+      'lütfen',
+      'lutfen',
+    ];
+
+    for (const phrase of stripPhrases) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      const regex = new RegExp(`(?<=^|[\\s.,;!?])${escaped}(?=$|[\\s.,;!?])`, 'giu');
+      cleanDesc = cleanDesc.replace(regex, ' ');
+    }
+
+    cleanDesc = cleanDesc
+      .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const title = cleanDesc ? capitalizeTurkishWords(cleanDesc) : isRefund ? 'Harcama İadesi' : 'Harcama';
+    const category = normalizeCategory(`${title} ${clause}`);
+
+    const itemTags: string[] = [...combinedBankTags, ...clauseHashtags];
+    const titleAscii = toAsciiLower(`${title} ${clause}`);
+    if (/yemeksepeti|getiryemek|trendyolyemek|yemek|restoran|lokanta|kebap|burger|pizza|doner/.test(titleAscii)) {
+      itemTags.push('#yemek');
+    }
+    if (/kahve|starbucks|espresso|kafe|cafe/.test(titleAscii)) {
+      itemTags.push('#kahve');
+    }
+    if (/market|migros|bim|a101|sok|carrefour|file|gida/.test(titleAscii)) {
+      itemTags.push('#market');
+    }
+    if (/migros/.test(titleAscii)) {
+      itemTags.push('#migros');
+    }
+    if (/benzin|mazot|akaryakit|opet|shell|petrol|bp\b/.test(titleAscii)) {
+      itemTags.push('#akaryakit');
+    }
+    if (/netflix|spotify|youtube|icloud|abonelik|fatura/.test(titleAscii)) {
+      itemTags.push('#abonelik');
+    }
+    if (/aidat|site\s*yonetimi|apartman/.test(titleAscii)) {
+      itemTags.push('#aidat');
+    }
+    if (/zara|mango|hm|lcw|boyner|giyim|kiyafet/.test(titleAscii)) {
+      itemTags.push('#giyim');
+    }
+    if (/teknosa|mediamarkt|vatan|apple|elektronik/.test(titleAscii)) {
+      itemTags.push('#elektronik');
+    }
+    if (installmentNote) {
+      itemTags.push('#taksit');
+    }
+    if (isRefund) {
+      itemTags.push('#iade');
+    }
+
+    proposed.push({
+      title,
+      amount: finalAmount,
+      currency,
+      amountInTRY: finalAmountTRY,
+      category,
+      tags: normalizeTagList(itemTags.length > 0 ? itemTags : ['#genel']),
+      date: messageDate,
+      notes: installmentNote,
+    });
+  }
+
+  if (proposed.length > 0) {
+    const summaryText =
+      proposed.length === 1
+        ? `"${proposed[0].title}" (${formatCurrency(proposed[0].amountInTRY, 'TRY')}) işlemini hazırladım ve etiketlerini (${proposed[0].tags.join(' ')}) otomatik atadım. Aşağıdaki onay kartından tek tıkla kaydedebilirsiniz:`
+        : `Mesajınızdan ${proposed.length} adet harcama tespit ettim ve ilgili etiketleri otomatik ekledim. Aşağıdaki onay kartından kontrol edip tek tıkla kaydedebilirsiniz:`;
+
+    return {
+      handled: true,
+      reply: summaryText,
+      proposedExpenses: proposed,
+    };
+  }
+
+  return {
+    handled: false,
+    reply:
+      'Harcama eklemek için "Bugün Sağlam Kart ile 220 TL kahve, 1450 TL market harcadım" gibi yazabilir veya harcamalarınız hakkında soru sorabilirsiniz.',
+    proposedExpenses: [],
+  };
+}
+
+/**
+ * Kullanıcının görsel eklerken yazdığı metinden (örn: "AC YAPI MOMENT ISTANBUL SITE YÖNETIMi #aidat olarak ekleyelim")
+ * başlık, kategori, etiket ve varsa tutar bilgisini anında ayrıştırır.
+ * Hem görsel analizi sonuçlarını zenginleştirmek hem de API gecikmesinde anında onay kartı sunmak için kullanılır.
+ */
+export function buildDraftExpenseFromPrompt(
+  message: string,
+  todayISO?: string
+): ExtractedExpense {
+  const today = todayISO || new Date().toISOString().slice(0, 10);
+  const raw = String(message || '').trim();
+  if (!raw) {
+    return {
+      title: 'Görsel Harcaması',
+      amount: 0,
+      currency: 'TRY',
+      amountInTRY: 0,
+      category: 'Diğer',
+      tags: ['#genel'],
+      date: today,
+      notes: '',
+    };
+  }
+
+  const instant = parseInstantAssistantMessage(raw, [], today);
+  if (instant.handled && instant.proposedExpenses.length > 0) {
+    return instant.proposedExpenses[0];
+  }
+
+  const explicitTags = (raw.match(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g) || []).map((t) =>
+    normalizeTag(t)
+  );
+  const bankTags = extractBankTagsFromText(raw);
+
+  let cleanDesc = toTurkishLower(raw).replace(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g, ' ');
+  const removeWords = [
+    'olarak',
+    'ekleyelim',
+    'kaydedelim',
+    'yazalım',
+    'yazalim',
+    'ekle',
+    'kaydet',
+    'yaz',
+    'gir',
+    'lütfen',
+    'lutfen',
+    'bunu',
+    'şunu',
+    'sunu',
+  ];
+  for (const w of removeWords) {
+    const regex = new RegExp(`(?<=^|[\\s.,;!?])${w}(?=$|[\\s.,;!?])`, 'giu');
+    cleanDesc = cleanDesc.replace(regex, ' ');
+  }
+  cleanDesc = cleanDesc
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const title = cleanDesc ? capitalizeTurkishWords(cleanDesc) : 'Görsel Harcaması';
+  const category = normalizeCategory(`${title} ${raw} ${explicitTags.join(' ')}`);
+  const mergedTags = normalizeTagList([
+    ...bankTags,
+    ...explicitTags,
+    ...(toAsciiLower(`${title} ${raw}`).includes('aidat') ? ['#aidat'] : []),
+  ]);
+
+  return {
+    title,
+    amount: 0,
+    currency: 'TRY',
+    amountInTRY: 0,
+    category,
+    tags: mergedTags.length > 0 ? mergedTags : ['#genel'],
+    date: today,
+    notes: '',
+  };
+}
+
+

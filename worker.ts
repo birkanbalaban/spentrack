@@ -5,11 +5,13 @@
  */
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
+  buildDraftExpenseFromPrompt,
   normalizeCategory,
   normalizeTagList,
+  parseInstantAssistantMessage,
   parseTurkishAmount,
 } from './src/utils/expenseLogic';
-import { ExpenseCategory, ExtractedExpense } from './src/types';
+import { ExtractedExpense } from './src/types';
 import {
   SPENTRACK_MCP_TOOLS,
   buildMcpServerInfo,
@@ -145,7 +147,7 @@ async function getCandidateApiKeys(
           .first<{ gemini_api_key?: string }>();
         pushUnique(row?.gemini_api_key);
 
-        if (cleanedHeaderKey && !row?.gemini_api_key) {
+        if (cleanedHeaderKey && row?.gemini_api_key !== cleanedHeaderKey) {
           await env.DB.prepare(
             `INSERT INTO users (id, email, name, gemini_api_key, updated_at)
              VALUES (?, '', 'Kullanıcı', ?, datetime('now'))
@@ -161,12 +163,12 @@ async function getCandidateApiKeys(
       }
     }
     pushUnique(memoryUserKeys.get(userId));
-    if (cleanedHeaderKey && !memoryUserKeys.get(userId)) {
+    if (cleanedHeaderKey) {
       memoryUserKeys.set(userId, cleanedHeaderKey);
     }
   }
 
-  if (env.DB) {
+  if (candidates.length === 0 && env.DB) {
     try {
       const anyRow = await env.DB.prepare(
         "SELECT gemini_api_key FROM users WHERE gemini_api_key IS NOT NULL AND length(gemini_api_key) > 10 ORDER BY updated_at DESC LIMIT 1"
@@ -183,6 +185,41 @@ async function getCandidateApiKeys(
   return candidates;
 }
 
+const GEMINI_TEXT_TIMEOUT_MS = 5000;
+const GEMINI_MEDIA_TIMEOUT_MS = 7500;
+const GEMINI_TOTAL_BUDGET_MS = 14000;
+
+function getFastThinkingConfig(modelName: string): Record<string, unknown> {
+  if (modelName.startsWith('gemini-2.5')) {
+    return { thinkingConfig: { thinkingBudget: 0 } };
+  }
+  if (modelName === 'gemini-3.8-flash' || modelName === 'gemini-3-flash-preview') {
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+  }
+  return {};
+}
+
+async function callGeminiWithTimeout<T>(
+  task: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`GEMINI_TIMEOUT: ${label} (${timeoutMs}ms sınırı aşıldı)`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([task(controller.signal), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function formatGeminiErrorMessage(err: unknown): { status: number; message: string } {
   const raw = err instanceof Error ? err.message : String(err || 'Belge analiz edilirken hata oluştu.');
   if (raw.includes('API_KEY_INVALID') || raw.includes('API key not valid')) {
@@ -190,6 +227,13 @@ function formatGeminiErrorMessage(err: unknown): { status: number; message: stri
       status: 400,
       message:
         "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden geçerli ('AIza...' veya 'AQ...' ile başlayan) anahtarınızı kontrol edip eksiksiz kopyaladığınızdan emin olun.",
+    };
+  }
+  if (raw.includes('GEMINI_TIMEOUT') || raw.includes('AbortError')) {
+    return {
+      status: 504,
+      message:
+        'Gemini API yanıt süresi sınırı aşıldı (zaman aşımı). Lütfen bağlantınızı kontrol edip tekrar deneyin veya daha küçük boyutlu bir görsel yükleyin.',
     };
   }
   return { status: 500, message: raw };
@@ -201,56 +245,108 @@ async function generateGeminiContentWithFallback(
     parts: Record<string, unknown>[];
     systemInstruction: string;
     responseSchema: Record<string, unknown>;
+    timeoutMs?: number;
+    operationLabel?: string;
   }
 ): Promise<string> {
   let lastError: unknown = null;
-
-  const ACTIVE_MODELS = [
-    'gemini-flash-latest',
-    'gemini-3.8-flash',
-    'gemini-3.6-flash',
-    'gemini-3.1-flash-lite',
-    'gemini-3.5-flash-lite',
-  ];
+  const overallStart = Date.now();
+  const hasMedia = params.parts.some((p) => 'inlineData' in p);
+  const perAttemptTimeoutMs =
+    params.timeoutMs ?? (hasMedia ? GEMINI_MEDIA_TIMEOUT_MS : GEMINI_TEXT_TIMEOUT_MS);
+  const opLabel = params.operationLabel || (hasMedia ? 'multimodal-extract' : 'text-chat');
 
   for (const apiKey of candidateKeys) {
+    const isAqKey = apiKey.startsWith('AQ');
+    const keyPrefix = `${apiKey.slice(0, 4)}...${apiKey.slice(-3)}`;
     const clientConfigs: Array<{
       vertexai?: boolean;
       httpOptions?: { headers: Record<string, string> };
-    }> = [{ httpOptions: undefined }];
-    if (apiKey.startsWith('AQ')) {
-      clientConfigs.push({ vertexai: true, httpOptions: undefined });
-    }
+      models: string[];
+    }> = isAqKey
+      ? [
+          {
+            vertexai: true,
+            models: ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash'],
+          },
+          {
+            vertexai: false,
+            models: ['gemini-2.5-flash', 'gemini-flash-latest'],
+          },
+        ]
+      : [
+          {
+            vertexai: false,
+            models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'],
+          },
+        ];
 
     for (const cfg of clientConfigs) {
+      const modeLabel = cfg.vertexai ? 'vertexai' : 'direct';
       const ai = new GoogleGenAI({
         apiKey,
         ...(cfg.vertexai ? { vertexai: true } : {}),
         ...(cfg.httpOptions ? { httpOptions: cfg.httpOptions } : {}),
       });
 
-      for (const modelName of ACTIVE_MODELS) {
-        try {
-          const isGemini3 = modelName.includes('gemini-3') || modelName.includes('gemini-4');
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: { parts: params.parts },
-            config: {
-              systemInstruction: params.systemInstruction,
-              responseMimeType: 'application/json',
-              responseSchema: params.responseSchema,
-              ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
-            },
-          });
+      for (const modelName of cfg.models) {
+        const elapsedTotal = Date.now() - overallStart;
+        if (elapsedTotal >= GEMINI_TOTAL_BUDGET_MS) {
+          console.warn(
+            `[SpenTrack Perf] Total budget (${GEMINI_TOTAL_BUDGET_MS}ms) reached after ${elapsedTotal}ms for op=${opLabel}; stopping further fallback attempts.`
+          );
+          throw lastError || new Error(`GEMINI_TIMEOUT: Toplam süre sınırı (${GEMINI_TOTAL_BUDGET_MS}ms) aşıldı.`);
+        }
 
+        const remainingBudget = GEMINI_TOTAL_BUDGET_MS - elapsedTotal;
+        const effectiveTimeoutMs = Math.max(2500, Math.min(perAttemptTimeoutMs, remainingBudget));
+        const attemptStart = Date.now();
+
+        try {
+          const response = await callGeminiWithTimeout(
+            (signal) =>
+              ai.models.generateContent({
+                model: modelName,
+                contents: { parts: params.parts },
+                config: {
+                  ...getFastThinkingConfig(modelName),
+                  systemInstruction: params.systemInstruction,
+                  responseMimeType: 'application/json',
+                  responseSchema: params.responseSchema,
+                  abortSignal: signal,
+                },
+              }),
+            effectiveTimeoutMs,
+            `${opLabel}:${modeLabel}:${modelName}`
+          );
+
+          const attemptMs = Date.now() - attemptStart;
+          const totalMs = Date.now() - overallStart;
           const text = (response.text || '{}').trim();
           if (text) {
+            console.info(
+              `[SpenTrack Perf] Gemini OK | op=${opLabel} model=${modelName} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms`
+            );
             return text;
           }
         } catch (err) {
           lastError = err;
+          const attemptMs = Date.now() - attemptStart;
+          const totalMs = Date.now() - overallStart;
           const msg = err instanceof Error ? err.message : String(err || '');
-          if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+          const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
+          console.warn(
+            `[SpenTrack Perf] Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=${opLabel} model=${modelName} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms reason=${msg.slice(0, 140)}`
+          );
+
+          if (
+            msg.includes('API_KEY_INVALID') ||
+            msg.includes('API key not valid') ||
+            msg.includes('UNAUTHENTICATED') ||
+            msg.includes('PERMISSION_DENIED') ||
+            msg.includes('401') ||
+            msg.includes('403')
+          ) {
             break;
           }
         }
@@ -277,126 +373,11 @@ function fallbackNaturalLanguageAssist(
   proposedExpenses: ExtractedExpense[];
   analysisHighlight?: { label: string; totalTRY: number; count: number };
 } {
-  const lower = message.toLowerCase();
-  const isQuestion =
-    lower.includes('ne kadar') ||
-    lower.includes('toplam') ||
-    lower.includes('kaç tl') ||
-    lower.includes('analiz') ||
-    lower.includes('özet') ||
-    lower.includes('?');
-
-  const detectedBankTags: string[] = [];
-  if (/sağlam\s*kart|saglam\s*kart|saglamkart/.test(lower)) detectedBankTags.push('#saglamkart');
-  if (/kuveyt\s*türk|kuveytturk/.test(lower)) detectedBankTags.push('#kuveytturk');
-  if (/yapı\s*kredi|yapikredi|world/.test(lower)) detectedBankTags.push('#yapikredi');
-  if (/garanti|bonus/.test(lower)) detectedBankTags.push('#garanti');
-  if (/enpara/.test(lower)) detectedBankTags.push('#enpara');
-  if (/nakit/.test(lower)) detectedBankTags.push('#nakit');
-
-  if (isQuestion) {
-    const tagMatches = message.match(/#[a-zA-Z0-9_çğıöşüÇĞİÖŞÜ-]+/g) || [];
-    const normalizedQueryTags = [
-      ...tagMatches.map((t) =>
-        t
-          .toLowerCase()
-          .replace(/ç/g, 'c')
-          .replace(/ğ/g, 'g')
-          .replace(/ı/g, 'i')
-          .replace(/ö/g, 'o')
-          .replace(/ş/g, 's')
-          .replace(/ü/g, 'u')
-      ),
-      ...detectedBankTags,
-    ];
-
-    let matchedCategory: string | null = null;
-    if (/dışarıda\s*yeme|yeme|içme|kahve|restoran/.test(lower)) matchedCategory = 'Yeme-İçme';
-    else if (/market|mutfak/.test(lower)) matchedCategory = 'Market';
-    else if (/ulaşım|akaryakıt|benzin|taksi/.test(lower)) matchedCategory = 'Ulaşım';
-    else if (/fatura|abonelik/.test(lower)) matchedCategory = 'Fatura & Abonelik';
-    else if (/alışveriş|giyim|elektronik/.test(lower)) matchedCategory = 'Alışveriş';
-    else if (/sağlık|eczane/.test(lower)) matchedCategory = 'Sağlık';
-
-    const filtered = existingExpenses.filter((e) => {
-      const tagHit =
-        normalizedQueryTags.length > 0 &&
-        normalizedQueryTags.some((qt) => e.tags.map((x) => x.toLowerCase()).includes(qt));
-      const catHit = matchedCategory && e.category === matchedCategory;
-      if (normalizedQueryTags.length > 0 && matchedCategory) return tagHit || catHit;
-      if (normalizedQueryTags.length > 0) return tagHit;
-      if (matchedCategory) return catHit;
-      return true;
-    });
-
-    const totalTRY =
-      Math.round(filtered.reduce((sum, item) => sum + Number(item.amountInTRY || 0), 0) * 100) / 100;
-    const labelParts: string[] = [];
-    if (normalizedQueryTags.length > 0) labelParts.push(normalizedQueryTags.join(', '));
-    if (matchedCategory) labelParts.push(matchedCategory);
-    const label = labelParts.length > 0 ? labelParts.join(' / ') : 'Tüm Harcamalar';
-
-    return {
-      reply: `${label} kapsamında toplam ${filtered.length} işlem bulundu. İadeler düşüldükten sonra net harcama tutarınız ${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 2 }).format(totalTRY)} ₺'dir.`,
-      proposedExpenses: [],
-      analysisHighlight: {
-        label,
-        totalTRY,
-        count: filtered.length,
-      },
-    };
-  }
-
-  const proposed: ExtractedExpense[] = [];
-  const clauses = message.split(/[,;]+|\bve\b/i);
-
-  for (const clause of clauses) {
-    const amountMatch = clause.match(/(-?\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|usd|\$|eur|€)?/i);
-    if (!amountMatch) continue;
-    const rawNum = parseTurkishAmount(amountMatch[1]);
-    if (!rawNum || rawNum === 0) continue;
-
-    const cleanDesc = clause
-      .replace(amountMatch[0], ' ')
-      .replace(
-        /\b(bugün|dün|ile|harcadım|aldım|ödedim|sağlam\s*kart|saglam\s*kart|yapı\s*kredi|garanti|enpara|kuveyt\s*türk|tl|lira)\b/gi,
-        ' '
-      )
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const title = cleanDesc ? cleanDesc.charAt(0).toUpperCase() + cleanDesc.slice(1) : 'Harcama';
-    const category: ExpenseCategory = normalizeCategory(title);
-    const itemTags = [...detectedBankTags];
-    if (/kahve|starbucks|espresso/i.test(title)) itemTags.push('#kahve');
-    if (/market|migros|bim|a101/i.test(title)) itemTags.push('#market');
-    if (/iade/i.test(clause)) itemTags.push('#iade');
-
-    const finalAmount = /iade/i.test(clause) && rawNum > 0 ? -rawNum : rawNum;
-
-    proposed.push({
-      title,
-      amount: finalAmount,
-      currency: 'TRY',
-      amountInTRY: finalAmount,
-      category,
-      tags: normalizeTagList(itemTags.length > 0 ? itemTags : ['#genel']),
-      date: today,
-      notes: '',
-    });
-  }
-
-  if (proposed.length > 0) {
-    return {
-      reply: `Mesajınızdan ${proposed.length} adet harcama tespit ettim ve ilgili etiketleri otomatik ekledim. Aşağıdaki onay kartından kontrol edip tek tıkla kaydedebilirsiniz.`,
-      proposedExpenses: proposed,
-    };
-  }
-
+  const res = parseInstantAssistantMessage(message, existingExpenses, today);
   return {
-    reply:
-      'Harcama eklemek için "Bugün Sağlam Kart ile 220 TL kahve, 1450 TL market harcadım" gibi yazabilir veya harcamalarınız hakkında soru sorabilirsiniz.',
-    proposedExpenses: [],
+    reply: res.reply,
+    proposedExpenses: res.proposedExpenses,
+    analysisHighlight: res.analysisHighlight,
   };
 }
 
@@ -1472,6 +1453,7 @@ export default {
 
       // POST /api/ai/extract
       if (url.pathname === '/api/ai/extract' && request.method === 'POST') {
+        const routeStart = Date.now();
         const body = (await request.json()) as {
           files?: { mimeType: string; data: string; name?: string }[];
           existingTags?: string[];
@@ -1508,6 +1490,8 @@ export default {
           responseText = await generateGeminiContentWithFallback(candidateKeys, {
             parts,
             systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
+            timeoutMs: GEMINI_MEDIA_TIMEOUT_MS,
+            operationLabel: 'extract-statement',
             responseSchema: {
               type: Type.OBJECT,
               properties: {
@@ -1535,10 +1519,19 @@ export default {
             },
           });
         } catch (lastError) {
+          const durationMs = Date.now() - routeStart;
+          console.error(`[SpenTrack Perf] POST /api/ai/extract FAILED in ${durationMs}ms`);
           const formatted = formatGeminiErrorMessage(lastError);
           return Response.json(
             { error: formatted.message },
-            { status: formatted.status, headers: corsHeaders }
+            {
+              status: formatted.status,
+              headers: {
+                ...corsHeaders,
+                'X-Response-Time-Ms': String(durationMs),
+                'Server-Timing': `extract;dur=${durationMs}`,
+              },
+            }
           );
         }
 
@@ -1558,18 +1551,30 @@ export default {
           })
         );
 
+        const durationMs = Date.now() - routeStart;
+        console.info(
+          `[SpenTrack Perf] POST /api/ai/extract OK | files=${(body.files || []).length} items=${normalizedExpenses.length} durationMs=${durationMs}ms`
+        );
+
         return Response.json(
           {
             detectedBank: parsed.detectedBank || '',
             summaryNote: parsed.summaryNote || `${normalizedExpenses.length} işlem tespit edildi.`,
             expenses: normalizedExpenses,
           },
-          { headers: corsHeaders }
+          {
+            headers: {
+              ...corsHeaders,
+              'X-Response-Time-Ms': String(durationMs),
+              'Server-Timing': `extract;dur=${durationMs}`,
+            },
+          }
         );
       }
 
       // POST /api/ai/chat
       if (url.pathname === '/api/ai/chat' && request.method === 'POST') {
+        const routeStart = Date.now();
         const today = new Date().toISOString().slice(0, 10);
         const body = (await request.json()) as {
           message?: string;
@@ -1591,11 +1596,41 @@ export default {
         const existingExpenses = body.existingExpenses || [];
         const existingTags = body.existingTags || [];
 
+        if (files.length === 0 && message.trim()) {
+          const instant = parseInstantAssistantMessage(message, existingExpenses, today);
+          if (instant.handled) {
+            const durationMs = Date.now() - routeStart;
+            console.info(
+              `[SpenTrack Perf] POST /api/ai/chat OK (instant-nlp) | items=${instant.proposedExpenses.length} durationMs=${durationMs}ms`
+            );
+            return Response.json(
+              {
+                reply: instant.reply,
+                proposedExpenses: instant.proposedExpenses,
+                analysisHighlight: instant.analysisHighlight,
+              },
+              {
+                headers: {
+                  ...corsHeaders,
+                  'X-Response-Time-Ms': String(durationMs),
+                  'Server-Timing': `instant_nlp;dur=${durationMs}`,
+                },
+              }
+            );
+          }
+        }
+
         const candidateKeys = await getCandidateApiKeys(env, request, userId);
 
         if (candidateKeys.length === 0 && files.length === 0) {
           const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
-          return Response.json(fallback, { headers: corsHeaders });
+          const durationMs = Date.now() - routeStart;
+          return Response.json(fallback, {
+            headers: {
+              ...corsHeaders,
+              'X-Response-Time-Ms': String(durationMs),
+            },
+          });
         }
 
         if (candidateKeys.length === 0) {
@@ -1621,29 +1656,42 @@ export default {
             }
           }
 
-          const compactLedger = existingExpenses.slice(0, 200).map((e) => ({
-            date: e.date,
-            title: e.title,
-            amountInTRY: e.amountInTRY,
-            category: e.category,
-            tags: e.tags,
-            notes: e.notes,
-          }));
+          if (files.length > 0) {
+            parts.push({
+              text: `Bugünün tarihi: ${today}. Mevcut #etiket havuzu: ${existingTags.slice(0, 30).join(', ')}.
+Kullanıcı mesajı / notu: "${message || 'Görseldeki harcamaları çıkar.'}"
+ÖNEMLİ: Görseldeki fiş, dekont veya ekran görüntüsündeki harcama tutarını ve tarihini hızlıca çıkar. Eğer kullanıcı mesajında özel bir başlık (örn: site yönetimi, market adı vb.) veya #etiket (örn: #aidat) belirttiyse doğrudan o başlığı ve etiketi kullan.`,
+            });
+          } else {
+            const compactLedger = existingExpenses.slice(0, 120).map((e) => ({
+              date: e.date,
+              title: e.title,
+              amountInTRY: e.amountInTRY,
+              category: e.category,
+              tags: e.tags,
+              notes: e.notes,
+            }));
 
-          parts.push({
-            text: `Bugünün tarihi: ${today}
+            parts.push({
+              text: `Bugünün tarihi: ${today}
 Kullanıcının mevcut #etiket havuzu: ${existingTags.join(', ')}
 Kullanıcının mevcut harcama kayıtları (JSON):
 ${JSON.stringify(compactLedger)}
 
 Kullanıcı mesajı: "${message}"`,
-          });
+            });
+          }
 
           let responseText = '';
           try {
             responseText = await generateGeminiContentWithFallback(candidateKeys, {
               parts,
-              systemInstruction: `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
+              systemInstruction:
+                files.length > 0
+                  ? EXTRACTION_SYSTEM_INSTRUCTION
+                  : `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
+              timeoutMs: files.length > 0 ? GEMINI_MEDIA_TIMEOUT_MS : GEMINI_TEXT_TIMEOUT_MS,
+              operationLabel: files.length > 0 ? 'assistant-media-chat' : 'assistant-text-chat',
               responseSchema: {
                 type: Type.OBJECT,
                 properties: {
@@ -1678,31 +1726,69 @@ Kullanıcı mesajı: "${message}"`,
               },
             });
           } catch (lastError) {
+            const durationMs = Date.now() - routeStart;
             if (files.length === 0) {
+              console.warn(
+                `[SpenTrack Perf] POST /api/ai/chat Gemini failed after ${durationMs}ms, using local NLP fallback`
+              );
               const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
-              return Response.json(fallback, { headers: corsHeaders });
+              return Response.json(fallback, {
+                headers: {
+                  ...corsHeaders,
+                  'X-Response-Time-Ms': String(durationMs),
+                },
+              });
             }
             const formatted = formatGeminiErrorMessage(lastError);
             return Response.json(
               { error: formatted.message },
-              { status: formatted.status, headers: corsHeaders }
+              {
+                status: formatted.status,
+                headers: {
+                  ...corsHeaders,
+                  'X-Response-Time-Ms': String(durationMs),
+                },
+              }
             );
           }
 
           const parsed = JSON.parse(responseText || '{}');
-          const normalizedExpenses: ExtractedExpense[] = (parsed.proposedExpenses || []).map(
-            (item: Record<string, unknown>) => ({
-              title: String(item.title || 'Harcama').trim(),
-              amount: parseTurkishAmount(item.amount as number | string),
-              currency: (['TRY', 'USD', 'EUR', 'GBP'].includes(String(item.currency))
-                ? item.currency
-                : 'TRY') as ExtractedExpense['currency'],
-              amountInTRY: parseTurkishAmount((item.amountInTRY ?? item.amount) as number | string),
-              category: normalizeCategory(String(item.category || 'Diğer')),
-              tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
-              date: String(item.date || today).slice(0, 10),
-              notes: String(item.notes || '').trim(),
-            })
+          const userDraft = files.length > 0 && message.trim() ? buildDraftExpenseFromPrompt(message, today) : null;
+          const rawList: Record<string, unknown>[] = Array.isArray(parsed.proposedExpenses) ? parsed.proposedExpenses : [];
+          const normalizedExpenses: ExtractedExpense[] = rawList.map(
+            (item: Record<string, unknown>) => {
+              const rawTitle = String(item.title || '').trim();
+              const finalTitle =
+                userDraft && rawList.length === 1 && userDraft.title !== 'Görsel Harcaması'
+                  ? userDraft.title
+                  : rawTitle || userDraft?.title || 'Harcama';
+              const mergedTags = normalizeTagList([
+                ...(Array.isArray(item.tags) ? (item.tags as string[]) : []),
+                ...(userDraft ? userDraft.tags.filter((t) => t !== '#genel') : []),
+              ]);
+              const finalCategory =
+                userDraft && userDraft.category !== 'Diğer'
+                  ? userDraft.category
+                  : normalizeCategory(String(item.category || finalTitle || 'Diğer'));
+
+              return {
+                title: finalTitle,
+                amount: parseTurkishAmount(item.amount as number | string),
+                currency: (['TRY', 'USD', 'EUR', 'GBP'].includes(String(item.currency))
+                  ? item.currency
+                  : 'TRY') as ExtractedExpense['currency'],
+                amountInTRY: parseTurkishAmount((item.amountInTRY ?? item.amount) as number | string),
+                category: finalCategory,
+                tags: mergedTags.length > 0 ? mergedTags : ['#genel'],
+                date: String(item.date || today).slice(0, 10),
+                notes: String(item.notes || '').trim(),
+              };
+            }
+          );
+
+          const durationMs = Date.now() - routeStart;
+          console.info(
+            `[SpenTrack Perf] POST /api/ai/chat OK (gemini) | files=${files.length} items=${normalizedExpenses.length} durationMs=${durationMs}ms`
           );
 
           return Response.json(
@@ -1711,17 +1797,35 @@ Kullanıcı mesajı: "${message}"`,
               proposedExpenses: normalizedExpenses,
               analysisHighlight: parsed.analysisHighlight,
             },
-            { headers: corsHeaders }
+            {
+              headers: {
+                ...corsHeaders,
+                'X-Response-Time-Ms': String(durationMs),
+                'Server-Timing': `chat;dur=${durationMs}`,
+              },
+            }
           );
         } catch (err) {
+          const durationMs = Date.now() - routeStart;
           if (files.length === 0) {
             const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
-            return Response.json(fallback, { headers: corsHeaders });
+            return Response.json(fallback, {
+              headers: {
+                ...corsHeaders,
+                'X-Response-Time-Ms': String(durationMs),
+              },
+            });
           }
           const formatted = formatGeminiErrorMessage(err);
           return Response.json(
             { error: formatted.message },
-            { status: formatted.status, headers: corsHeaders }
+            {
+              status: formatted.status,
+              headers: {
+                ...corsHeaders,
+                'X-Response-Time-Ms': String(durationMs),
+              },
+            }
           );
         }
       }
