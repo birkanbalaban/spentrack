@@ -84,16 +84,20 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   const activeAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (customApiKey) {
+      setLiveDraftKey(customApiKey);
+    }
+  }, [customApiKey]);
+
+  useEffect(() => {
     if (!loading || !loadingMeta) return;
     const interval = setInterval(() => {
       setLoadingMeta((prev) => {
         if (!prev) return null;
         const elapsedSec = Math.round(((Date.now() - prev.startedAt) / 1000) * 10) / 10;
         let stageLabel = prev.stageLabel;
-        if (elapsedSec >= 2.0 && elapsedSec < 5.0 && prev.fileSummary) {
-          stageLabel = 'Görsel OCR okunuyor (Hızlı Mod · Düşünme Kapalı)...';
-        } else if (elapsedSec >= 5.0) {
-          stageLabel = 'Yedek Gemini kanalı devrede, yanıt bekleniyor...';
+        if (elapsedSec >= 2.0 && prev.fileSummary) {
+          stageLabel = 'Görsel Gemini 4 Hydrogen ile okunuyor (Hızlı Mod)...';
         }
         return { ...prev, elapsedSec, stageLabel };
       });
@@ -212,8 +216,8 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       keyStatus: keyStatusText,
       stageLabel:
         currentAttachments.length > 0
-          ? 'Görsel Gemini 2.5 Flash’a gönderiliyor (Düşünme Modu Kapalı)...'
-          : 'Gemini yanıtı bekleniyor...',
+          ? 'Görsel Gemini 4 Hydrogen’a gönderiliyor...'
+          : 'Gemini 4 Hydrogen yanıtı bekleniyor...',
       pendingText: text,
     });
 
@@ -238,7 +242,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         proposedExpenses?: ExtractedExpense[];
       } | null = null;
 
-      const fetchTimeoutMs = payloadFiles.length > 0 ? 9000 : 6000;
+      const fetchTimeoutMs = payloadFiles.length > 0 ? 26000 : 14000;
       const reqStart = performance.now();
 
       const serverCall = async () => {
@@ -273,41 +277,25 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         }
       };
 
-      if (hasValidClientKey) {
-        // Kullanıcının API anahtarı tanımlıysa: Sunucu 1.8 sn içinde dönmezse doğrudan istemci Gemini (thinkingBudget: 0) paralel devreye girer, hangisi önce biterse anında yanıt döner!
-        const hedgedClientCall = new Promise<{
-          reply: string;
-          analysisHighlight?: ChatMessage['analysisHighlight'];
-          proposedExpenses: ExtractedExpense[];
-        }>((resolve, reject) => {
-          const hedgeTimer = setTimeout(() => {
-            if (abortCtrl.signal.aborted) {
-              reject(new Error('İptal edildi'));
-              return;
-            }
-            chatWithAssistantDirectClient({
-              apiKey: activeKey,
-              message: text,
-              files: payloadFiles,
-              existingExpenses: payloadFiles.length > 0 ? [] : expenses,
-              existingTags: existingTags.slice(0, 30),
-            })
-              .then(resolve)
-              .catch(reject);
-          }, 1800);
-
-          abortCtrl.signal.addEventListener('abort', () => clearTimeout(hedgeTimer), { once: true });
-        });
-
-        try {
-          chatData = await Promise.any([serverCall(), hedgedClientCall]);
-        } catch (aggregateErr) {
-          // Her ikisi de hata verdiyse doğrudan son bir istemci denemesi veya hata fırlat
-          const errors = (aggregateErr as AggregateError)?.errors || [aggregateErr];
-          throw errors[0] || new Error('Gemini API yanıt vermedi.');
-        }
-      } else {
+      try {
         chatData = await serverCall();
+      } catch (serverErr) {
+        // Sunucu geçici hata verirse ve tarayıcıda CORS destekli AIza... anahtarı varsa doğrudan istemciden dene
+        if (hasValidClientKey && activeKey.startsWith('AIza')) {
+          console.warn(
+            '[SpenTrack Perf] /api/ai/chat failed, retrying direct client with AIza key:',
+            serverErr
+          );
+          chatData = await chatWithAssistantDirectClient({
+            apiKey: activeKey,
+            message: text,
+            files: payloadFiles,
+            existingExpenses: payloadFiles.length > 0 ? [] : expenses,
+            existingTags: existingTags.slice(0, 30),
+          });
+        } else {
+          throw serverErr;
+        }
       }
 
       const rawProposed: ExtractedExpense[] = chatData?.proposedExpenses || [];

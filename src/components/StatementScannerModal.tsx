@@ -188,10 +188,10 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         expenses?: ExtractedExpense[];
       } | null = null;
 
-      const fetchTimeoutMs = 16000;
+      const fetchTimeoutMs = 26000;
       const reqStart = performance.now();
 
-      try {
+      const runServerExtract = async () => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
         try {
@@ -215,17 +215,20 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
           if (!res.ok) {
             throw new Error(data.error || 'Ekstre analiz edilemedi.');
           }
-          extractedData = data;
+          return data;
         } finally {
           clearTimeout(timer);
         }
+      };
+
+      try {
+        extractedData = await runServerExtract();
       } catch (serverErr) {
-        const elapsedMs = Math.round(performance.now() - reqStart);
-        console.warn(
-          `[SpenTrack Perf] /api/ai/extract failed/aborted after ${elapsedMs}ms:`,
-          serverErr instanceof Error ? serverErr.message : String(serverErr)
-        );
-        if (activeKey && isValidGeminiApiKey(activeKey)) {
+        if (activeKey && isValidGeminiApiKey(activeKey) && activeKey.startsWith('AIza')) {
+          console.warn(
+            '[SpenTrack Perf] /api/ai/extract failed, retrying direct client with AIza key:',
+            serverErr
+          );
           extractedData = await extractStatementDirectClient({
             apiKey: activeKey,
             files: payloadFiles,

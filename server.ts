@@ -171,30 +171,25 @@ if (existingCount.cnt === 0) {
   seedTx(seedItems);
 }
 
-const EXTRACTION_SYSTEM_INSTRUCTION = `Sen "SpenTrack" adlı Türkiye odaklı finans ve harcama takip sisteminin uzman finansal belge ayrıştırıcısısın.
-Görevin: Kullanıcının yüklediği fiş fotoğrafı, mobil bankacılık ekran görüntüsü veya çok sayfalı PDF kredi kartı ekstresindeki TÜM geçerli harcama ve iade satırlarını eksiksiz ayıklamaktır.
+const EXTRACTION_SYSTEM_INSTRUCTION = `Sen "SpenTrack" adlı Türkiye odaklı finans, dekont ve harcama takip sisteminin hızlı görsel ayrıştırıcısısın.
+Görevin: Kullanıcının yüklediği fiş fotoğrafı, Havale/EFT/FAST transfer ekranı, mobil bankacılık ekran görüntüsü veya PDF kredi kartı ekstresindeki geçerli harcama satırlarını JSON olarak ayıklamaktır.
 
-KRİTİK TÜRKİYE BANKACILIK VE EKSTRE KURALLARI:
-1. BANKA TANIMA: Görselin veya PDF ekstresinin hangi bankaya/karta ait olduğunu başlıktan, logodan veya arayüzden tespit et ve TÜM satırlara ilgili banka etiketini otomatik ekle:
-   - Yapı Kredi / World -> "#yapikredi"
-   - Kuveyt Türk / Sağlam Kart -> "#saglamkart", "#kuveytturk"
-   - Garanti BBVA / Bonus -> "#garanti"
-   - Enpara.com -> "#enpara"
-   - İş Bankası / Maximum -> "#isbankasi"
-   - Akbank / Axess -> "#akbank"
-2. TUZAK SATIRLARI KESİNLİKLE YOK SAY:
-   - "Önceki Dönem Bakiyesi", "Dönem Borcu Ödemesi", "Teşekkür Ederiz", "Hesaptan Aktarım", "Otomatik Ödeme Tahsilatı", "Kazanılan Worldpuan / Altın Puan / Bonus", "Toplam Dönem Borcu", "Asgari Ödeme Tutarı" gibi ödeme/bilgi satırlarını KESİNLİKLE harcama olarak alma!
-3. TAKSİTLİ İŞLEMLER:
-   - Taksitli işlemlerde (örn: "2/6 Taksit", "3/9 Taksit") toplam alışveriş borcunu değil, SADECE o döneme yansıyan taksit tutarını "amount" olarak al.
-   - Etiketlere "#taksit" ekle ve "notes" alanına kaçıncı taksit olduğunu (örn: "2/6 Taksit") yaz.
-4. İADE VE İPTALLER:
-   - İade, iptal veya alacak ("-" veya "+" ile gösterilen iade) satırlarında tutarı negatif ("-amount", örn: -350.00) olarak çıkar ve etiketlere "#iade" ekle.
-5. TÜRKİYE PARA FORMATI:
-   - "1.250,50 TL" gibi tutarları noktadan arındırıp virgülü ondalık noktaya çevirerek 1250.50 (NUMBER) olarak döndür.
-6. SABİT KATEGORİLER:
-   - "category" alanı SADECE şu 8 değerden biri olabilir: "Market", "Yeme-İçme", "Ulaşım", "Fatura & Abonelik", "Alışveriş", "Eğlence", "Sağlık", "Diğer".
-7. ETİKET TUTARLILIĞI:
-   - Kullanıcının mevcut #etiket havuzundaki etiketleri önceliklendir. Tüm etiketler "#" ile başlamalı ve küçük harf olmalıdır (örn: "#migros", "#kahve").`;
+KRİTİK KURALLAR:
+1. HAVALE / EFT / FAST TRANSFER EKRANLARI:
+   - "Bakiye / Kullanılabilir Bakiye" (örn: 44.330,15 TL) veya "0,00 TL İşlem Masrafı" satırlarını KESİNLİKLE harcama tutarı olarak alma!
+   - Sadece "İşlem Bilgileri -> Tutar" alanındaki gerçek ödeme/transfer tutarını (örn: 5.867,60 TL -> 5867.6) "amount" olarak al.
+   - "Alıcı Ad Soyad/Ünvan" bilgisini "title" olarak al, "Açıklama" bilgisini "notes" içine yaz.
+2. BANKA TANIMA:
+   - Yapı Kredi / World -> "#yapikredi", Kuveyt Türk / Sağlam Kart -> "#saglamkart", Garanti -> "#garanti", Enpara -> "#enpara", İş Bankası -> "#isbankasi", Akbank -> "#akbank", VakıfBank -> "#vakifbank", Ziraat -> "#ziraat".
+3. EKSTRE TUZAK SATIRLARI YOK SAY:
+   - "Önceki Dönem Bakiyesi", "Dönem Borcu Ödemesi", "Teşekkür Ederiz", "Kazanılan Worldpuan / Bonus", "Toplam Dönem Borcu", "Asgari Ödeme Tutarı" satırlarını ASLA harcama olarak alma!
+4. TAKSİT, HESAP ÇIKIŞI VE İADE:
+   - Taksitli işlemlerde (örn: "2/6 Taksit") sadece tek dönem taksit tutarını al, "#taksit" ekle.
+   - Banka hesap hareketlerinde "-560,00 TL | Ödeme - Enerjisa Ayesaş faturası" gibi eksi (-) işareti hesap çıkışını gösterir, İADE DEĞİLDİR! Açıklamada açıkça İade/İptal/Cashback yazmıyorsa tutarı POZİTİF (+560) harcama olarak çıkar.
+   - Gerçek iadelerde tutarı negatif (-amount) yap ve "#iade" ekle.
+5. KATEGORİ (Sadece şu 8 değerden biri): "Market", "Yeme-İçme", "Ulaşım", "Fatura & Abonelik", "Alışveriş", "Eğlence", "Sağlık", "Diğer".
+6. YANIT FORMATI (Sadece geçerli JSON döndür):
+{"detectedBank": "Banka", "summaryNote": "Özet", "reply": "Kısa Türkçe açıklama", "expenses": [{"title": "Başlık", "amount": 5867.6, "currency": "TRY", "amountInTRY": 5867.6, "category": "Fatura & Abonelik", "tags": ["#aidat"], "date": "2026-11-10", "notes": ""}], "proposedExpenses": [{"title": "Başlık", "amount": 5867.6, "currency": "TRY", "amountInTRY": 5867.6, "category": "Fatura & Abonelik", "tags": ["#aidat"], "date": "2026-11-10", "notes": ""}]}`;
 
 const CHAT_SYSTEM_INSTRUCTION = `Sen "SpenTrack Asistan" adında, Türkçe konuşan, hızlı, yalın ve net bir kişisel harcama & ekstre asistanısın.
 Kullanıcı sana iki tür istekte bulunabilir:
@@ -296,18 +291,28 @@ function getCandidateApiKeys(userId: string, customKey?: string): string[] {
   return candidates;
 }
 
-const GEMINI_TEXT_TIMEOUT_MS = 5000;
-const GEMINI_MEDIA_TIMEOUT_MS = 7500;
-const GEMINI_TOTAL_BUDGET_MS = 14000;
+const GEMINI_TEXT_TIMEOUT_MS = 12000;
+const GEMINI_MEDIA_TIMEOUT_MS = 24000;
+const GEMINI_TOTAL_BUDGET_MS = 26000;
+const PRIMARY_VISION_MODEL = 'gemini-4-hydrogen';
 
-function getFastThinkingConfig(modelName: string): Record<string, unknown> {
-  if (modelName.startsWith('gemini-2.5')) {
-    return { thinkingConfig: { thinkingBudget: 0 } };
+function parseGeminiJsonSafe(rawText: string): Record<string, unknown> {
+  const cleaned = String(rawText || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  if (!cleaned) return {};
+  try {
+    return JSON.parse(cleaned) as Record<string, unknown>;
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+    }
+    return {};
   }
-  if (modelName === 'gemini-3.8-flash' || modelName === 'gemini-3-flash-preview') {
-    return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
-  }
-  return {};
 }
 
 async function callGeminiWithTimeout<T>(
@@ -344,7 +349,7 @@ function formatGeminiErrorMessage(err: unknown): { status: number; message: stri
     return {
       status: 504,
       message:
-        'Gemini API yanıt süresi sınırı aşıldı (zaman aşımı). Lütfen bağlantınızı kontrol edip tekrar deneyin veya daha küçük boyutlu bir görsel yükleyin.',
+        'Gemini API yanıt süresi sınırı aşıldı (zaman aşımı). Lütfen bağlantınızı kontrol edip tekrar deneyin.',
     };
   }
   return { status: 500, message: raw };
@@ -355,7 +360,7 @@ async function generateGeminiContentWithFallback(
   params: {
     parts: Record<string, unknown>[];
     systemInstruction: string;
-    responseSchema: Record<string, unknown>;
+    responseSchema?: Record<string, unknown>;
     timeoutMs?: number;
     operationLabel?: string;
   }
@@ -370,98 +375,61 @@ async function generateGeminiContentWithFallback(
   for (const apiKey of candidateKeys) {
     const isAqKey = apiKey.startsWith('AQ');
     const keyPrefix = `${apiKey.slice(0, 4)}...${apiKey.slice(-3)}`;
-    const clientConfigs: Array<{
-      vertexai?: boolean;
-      httpOptions?: { headers: Record<string, string> };
-      models: string[];
-    }> = isAqKey
-      ? [
-          {
-            vertexai: true,
-            models: ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash'],
-          },
-          {
-            vertexai: false,
-            models: ['gemini-2.5-flash', 'gemini-flash-latest'],
-          },
-        ]
-      : [
-          {
-            vertexai: false,
-            models: ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'],
-          },
-        ];
+    const modeLabel = isAqKey ? 'vertexai' : 'direct';
+    const ai = new GoogleGenAI({
+      apiKey,
+      ...(isAqKey ? { vertexai: true } : {}),
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
 
-    for (const cfg of clientConfigs) {
-      const modeLabel = cfg.vertexai ? 'vertexai' : 'direct';
-      const ai = new GoogleGenAI({
-        apiKey,
-        ...(cfg.vertexai ? { vertexai: true } : {}),
-        ...(cfg.httpOptions ? { httpOptions: cfg.httpOptions } : {}),
-      });
+    const elapsedTotal = Date.now() - overallStart;
+    if (elapsedTotal >= GEMINI_TOTAL_BUDGET_MS) {
+      throw lastError || new Error(`GEMINI_TIMEOUT: Toplam süre sınırı (${GEMINI_TOTAL_BUDGET_MS}ms) aşıldı.`);
+    }
 
-      for (const modelName of cfg.models) {
-        const elapsedTotal = Date.now() - overallStart;
-        if (elapsedTotal >= GEMINI_TOTAL_BUDGET_MS) {
-          console.warn(
-            `[SpenTrack Perf] Total budget (${GEMINI_TOTAL_BUDGET_MS}ms) reached after ${elapsedTotal}ms for op=${opLabel}; stopping further fallback attempts.`
-          );
-          throw lastError || new Error(`GEMINI_TIMEOUT: Toplam süre sınırı (${GEMINI_TOTAL_BUDGET_MS}ms) aşıldı.`);
-        }
+    const remainingBudget = GEMINI_TOTAL_BUDGET_MS - elapsedTotal;
+    const effectiveTimeoutMs = Math.max(4000, Math.min(perAttemptTimeoutMs, remainingBudget));
+    const attemptStart = Date.now();
 
-        const remainingBudget = GEMINI_TOTAL_BUDGET_MS - elapsedTotal;
-        const effectiveTimeoutMs = Math.max(2500, Math.min(perAttemptTimeoutMs, remainingBudget));
-        const attemptStart = Date.now();
+    try {
+      const response = await callGeminiWithTimeout(
+        (signal) =>
+          ai.models.generateContent({
+            model: PRIMARY_VISION_MODEL,
+            contents: { parts: params.parts },
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction: params.systemInstruction,
+              responseMimeType: 'application/json',
+              abortSignal: signal,
+            },
+          }),
+        effectiveTimeoutMs,
+        `${opLabel}:${modeLabel}:${PRIMARY_VISION_MODEL}`
+      );
 
-        try {
-          const response = await callGeminiWithTimeout(
-            (signal) =>
-              ai.models.generateContent({
-                model: modelName,
-                contents: { parts: params.parts },
-                config: {
-                  ...getFastThinkingConfig(modelName),
-                  systemInstruction: params.systemInstruction,
-                  responseMimeType: 'application/json',
-                  responseSchema: params.responseSchema,
-                  abortSignal: signal,
-                },
-              }),
-            effectiveTimeoutMs,
-            `${opLabel}:${modeLabel}:${modelName}`
-          );
-
-          const attemptMs = Date.now() - attemptStart;
-          const totalMs = Date.now() - overallStart;
-          const text = (response.text || '{}').trim();
-          if (text) {
-            console.info(
-              `[SpenTrack Perf] Gemini OK | op=${opLabel} model=${modelName} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms`
-            );
-            return text;
-          }
-        } catch (err) {
-          lastError = err;
-          const attemptMs = Date.now() - attemptStart;
-          const totalMs = Date.now() - overallStart;
-          const msg = err instanceof Error ? err.message : String(err || '');
-          const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
-          console.warn(
-            `[SpenTrack Perf] Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=${opLabel} model=${modelName} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms reason=${msg.slice(0, 140)}`
-          );
-
-          if (
-            msg.includes('API_KEY_INVALID') ||
-            msg.includes('API key not valid') ||
-            msg.includes('UNAUTHENTICATED') ||
-            msg.includes('PERMISSION_DENIED') ||
-            msg.includes('401') ||
-            msg.includes('403')
-          ) {
-            break;
-          }
-        }
+      const attemptMs = Date.now() - attemptStart;
+      const totalMs = Date.now() - overallStart;
+      const text = (response.text || '{}').trim();
+      if (text) {
+        console.info(
+          `[SpenTrack Perf] Gemini OK | op=${opLabel} model=${PRIMARY_VISION_MODEL} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms`
+        );
+        return text;
       }
+    } catch (err) {
+      lastError = err;
+      const attemptMs = Date.now() - attemptStart;
+      const totalMs = Date.now() - overallStart;
+      const msg = err instanceof Error ? err.message : String(err || '');
+      const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
+      console.warn(
+        `[SpenTrack Perf] Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=${opLabel} model=${PRIMARY_VISION_MODEL} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms reason=${msg.slice(0, 140)}`
+      );
     }
   }
 
@@ -1372,9 +1340,14 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
         },
       });
 
-      const parsed = JSON.parse(responseText || '{}');
-      const normalizedExpenses: ExtractedExpense[] = (parsed.expenses || []).map(
-        (item: Record<string, unknown>) => ({
+      const parsed = parseGeminiJsonSafe(responseText || '{}');
+      const rawExpenses = Array.isArray(parsed.expenses)
+        ? parsed.expenses
+        : Array.isArray(parsed.proposedExpenses)
+        ? parsed.proposedExpenses
+        : [];
+      const normalizedExpenses: ExtractedExpense[] = (rawExpenses as Record<string, unknown>[])
+        .map((item: Record<string, unknown>) => ({
           title: String(item.title || 'Harcama').trim(),
           amount: parseTurkishAmount(item.amount as number | string),
           currency: (['TRY', 'USD', 'EUR', 'GBP'].includes(String(item.currency))
@@ -1385,8 +1358,8 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
           tags: normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []),
           date: String(item.date || today).slice(0, 10),
           notes: String(item.notes || '').trim(),
-        })
-      );
+        }))
+        .filter((item) => item.amount !== 0);
 
       const durationMs = Date.now() - routeStart;
       console.info(
@@ -1561,16 +1534,18 @@ Kullanıcı mesajı: "${message}"`,
         return;
       }
 
-      const parsed = JSON.parse(responseText || '{}');
+      const parsed = parseGeminiJsonSafe(responseText || '{}');
       const userDraft =
         files && files.length > 0 && String(message || '').trim()
           ? buildDraftExpenseFromPrompt(message, today)
           : null;
       const rawList: Record<string, unknown>[] = Array.isArray(parsed.proposedExpenses)
         ? parsed.proposedExpenses
+        : Array.isArray(parsed.expenses)
+        ? (parsed.expenses as Record<string, unknown>[])
         : [];
-      const normalizedExpenses: ExtractedExpense[] = rawList.map(
-        (item: Record<string, unknown>) => {
+      const normalizedExpenses: ExtractedExpense[] = rawList
+        .map((item: Record<string, unknown>) => {
           const rawTitle = String(item.title || '').trim();
           const finalTitle =
             userDraft && rawList.length === 1 && userDraft.title !== 'Görsel Harcaması'
@@ -1597,8 +1572,8 @@ Kullanıcı mesajı: "${message}"`,
             date: String(item.date || today).slice(0, 10),
             notes: String(item.notes || '').trim(),
           };
-        }
-      );
+        })
+        .filter((item) => item.amount !== 0);
 
       const durationMs = Date.now() - routeStart;
       console.info(
