@@ -280,10 +280,9 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       try {
         chatData = await serverCall();
       } catch (serverErr) {
-        // Sunucu geçici hata verirse ve tarayıcıda CORS destekli AIza... anahtarı varsa doğrudan istemciden dene
-        if (hasValidClientKey && activeKey.startsWith('AIza')) {
+        if (hasValidClientKey) {
           console.warn(
-            '[SpenTrack Perf] /api/ai/chat failed, retrying direct client with AIza key:',
+            '[SpenTrack Perf] /api/ai/chat failed, retrying direct client:',
             serverErr
           );
           chatData = await chatWithAssistantDirectClient({

@@ -373,12 +373,10 @@ async function generateGeminiContentWithFallback(
   const opLabel = params.operationLabel || (hasMedia ? 'multimodal-extract' : 'text-chat');
 
   for (const apiKey of candidateKeys) {
-    const isAqKey = apiKey.startsWith('AQ');
     const keyPrefix = `${apiKey.slice(0, 4)}...${apiKey.slice(-3)}`;
-    const modeLabel = isAqKey ? 'vertexai' : 'direct';
+    const modeLabel = 'direct';
     const ai = new GoogleGenAI({
       apiKey,
-      ...(isAqKey ? { vertexai: true } : {}),
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',

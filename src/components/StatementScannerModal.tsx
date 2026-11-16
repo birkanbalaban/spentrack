@@ -224,9 +224,9 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
       try {
         extractedData = await runServerExtract();
       } catch (serverErr) {
-        if (activeKey && isValidGeminiApiKey(activeKey) && activeKey.startsWith('AIza')) {
+        if (activeKey && isValidGeminiApiKey(activeKey)) {
           console.warn(
-            '[SpenTrack Perf] /api/ai/extract failed, retrying direct client with AIza key:',
+            '[SpenTrack Perf] /api/ai/extract failed, retrying direct client:',
             serverErr
           );
           extractedData = await extractStatementDirectClient({

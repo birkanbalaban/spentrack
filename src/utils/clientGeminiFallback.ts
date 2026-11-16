@@ -78,14 +78,8 @@ async function callSingleVisionModel<T>(
   }
 }
 
-function createDirectClient(apiKey: string): { ai: GoogleGenAI; mode: 'vertex' | 'aistudio' } {
+function createDirectClient(apiKey: string): { ai: GoogleGenAI; mode: 'aistudio' } {
   const trimmed = apiKey.trim();
-  if (trimmed.startsWith('AQ')) {
-    return {
-      ai: new GoogleGenAI({ vertexai: true, apiKey: trimmed }),
-      mode: 'vertex',
-    };
-  }
   return {
     ai: new GoogleGenAI({ apiKey: trimmed }),
     mode: 'aistudio',
