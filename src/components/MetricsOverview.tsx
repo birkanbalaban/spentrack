@@ -8,6 +8,7 @@ interface MetricsOverviewProps {
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
   activeMonthLabel: string;
+  isPrivacyMode?: boolean;
   onSelectTagFilter: (tag: string) => void;
 }
 
@@ -16,6 +17,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
   displayCurrency,
   rates,
   activeMonthLabel,
+  isPrivacyMode = false,
   onSelectTagFilter,
 }) => {
   // 1 USD, 1 EUR, 1 GBP kaç TL hesaplaması (SubTrack alt kur bilgi satırı)
@@ -42,7 +44,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
               data-testid="metric-monthly-total"
               className="text-2xl sm:text-3xl font-bold tracking-tight text-[#f4f4f5] font-mono tabular-nums"
             >
-              {formatCurrency(metrics.monthlyNetTotalTRY, displayCurrency, rates)}
+              {formatCurrency(metrics.monthlyNetTotalTRY, displayCurrency, rates, false, isPrivacyMode)}
             </div>
             <div className="mt-1 text-xs text-[#71717a] flex flex-wrap items-center gap-1.5 font-mono tabular-nums">
               <span>{activeMonthLabel} net toplam</span>
@@ -50,7 +52,9 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
                 <>
                   <span aria-hidden="true">·</span>
                   <span className="text-[#10b981] font-medium">
-                    -{formatCurrency(metrics.refundTotalTRY, displayCurrency, rates)} iade düşüldü
+                    {isPrivacyMode
+                      ? `${formatCurrency(metrics.refundTotalTRY, displayCurrency, rates, false, true)} iade düşüldü`
+                      : `-${formatCurrency(metrics.refundTotalTRY, displayCurrency, rates)} iade düşüldü`}
                   </span>
                 </>
               )}
@@ -71,7 +75,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
               data-testid="metric-daily-avg"
               className="text-2xl sm:text-3xl font-bold tracking-tight text-[#f4f4f5] font-mono tabular-nums"
             >
-              {formatCurrency(metrics.dailyAverageTRY, displayCurrency, rates)}
+              {formatCurrency(metrics.dailyAverageTRY, displayCurrency, rates, false, isPrivacyMode)}
             </div>
             <div className="mt-1 text-xs text-[#71717a]">
               Günlük net harcama temposu
@@ -118,7 +122,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
                   </button>
                   <span aria-hidden="true" className="text-[#71717a]">·</span>
                   <span className="font-mono tabular-nums text-[#a1a1aa]">
-                    {formatCurrency(metrics.topTag.amountTRY, displayCurrency, rates)}
+                    {formatCurrency(metrics.topTag.amountTRY, displayCurrency, rates, false, isPrivacyMode)}
                   </span>
                 </>
               ) : (

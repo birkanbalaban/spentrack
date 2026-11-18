@@ -1,13 +1,27 @@
-import React, { useState } from 'react';
-import { PieChart, Tag } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  CalendarClock,
+  Minus,
+  PieChart,
+  Tag,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react';
 import {
   CurrencyCode,
   CurrencyRates,
   Expense,
   ExpenseCategory,
   FIXED_CATEGORIES,
+  PaymentReminder,
 } from '../types';
 import {
+  calculateMonthEndHabitProjection,
+  calculateWeeklyCategorySummary,
   formatCurrency,
   getCategoryColor,
   getTagColor,
@@ -15,10 +29,16 @@ import {
 
 interface AnalyticsViewProps {
   expenses: Expense[];
+  reminders?: PaymentReminder[];
+  monthYear?: string;
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
+  isPrivacyMode?: boolean;
+  mode?: 'full' | 'weekly-summary';
+  activeCategory?: ExpenseCategory | 'ALL';
+  referenceDateISO?: string;
   onSelectCategory: (cat: ExpenseCategory) => void;
-  onSelectTag: (tag: string) => void;
+  onSelectTag?: (tag: string) => void;
 }
 
 interface DonutSlice {
@@ -37,6 +57,7 @@ const DonutChart: React.FC<{
   centerSubtitle: string;
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
+  isPrivacyMode?: boolean;
   hoveredId: string | null;
   onHover: (id: string | null) => void;
   onClickSlice: (id: string) => void;
@@ -46,6 +67,7 @@ const DonutChart: React.FC<{
   centerSubtitle,
   displayCurrency,
   rates,
+  isPrivacyMode = false,
   hoveredId,
   onHover,
   onClickSlice,
@@ -124,7 +146,9 @@ const DonutChart: React.FC<{
           {formatCurrency(
             hoveredSlice ? hoveredSlice.totalTRY : totalTRY,
             displayCurrency,
-            rates
+            rates,
+            false,
+            isPrivacyMode
           )}
         </span>
         <span className="mt-0.5 text-xs text-[#71717a] font-mono tabular-nums">
@@ -137,13 +161,279 @@ const DonutChart: React.FC<{
 
 export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   expenses,
+  reminders = [],
+  monthYear,
   displayCurrency,
   rates,
+  isPrivacyMode = false,
+  mode = 'full',
+  activeCategory = 'ALL',
+  referenceDateISO,
   onSelectCategory,
   onSelectTag,
 }) => {
   const [hoveredCat, setHoveredCat] = useState<string | null>(null);
   const [hoveredTag, setHoveredTag] = useState<string | null>(null);
+
+  const weeklySummary = useMemo(
+    () => calculateWeeklyCategorySummary(expenses, referenceDateISO),
+    [expenses, referenceDateISO]
+  );
+
+  const monthProjection = useMemo(
+    () =>
+      calculateMonthEndHabitProjection(expenses, {
+        monthYear,
+        referenceDateISO,
+        reminders,
+      }),
+    [expenses, monthYear, referenceDateISO, reminders]
+  );
+
+  if (mode === 'weekly-summary') {
+    if (weeklySummary.topCategories.length === 0) {
+      return null;
+    }
+
+    const {
+      dateRangeLabel,
+      isAnchoredToToday,
+      currentWeekTotalTRY,
+      currentWeekCount,
+      changePercent,
+      trendDirection,
+      topCategories,
+      otherPercentage,
+    } = weeklySummary;
+
+    return (
+      <section
+        aria-label="Haftalık Özet — En Çok Harcama Yapılan İlk 3 Kategori"
+        data-testid="weekly-summary-card"
+        className="bg-[#111114] border border-[#222226] rounded-xl p-4 sm:p-5 space-y-3.5"
+      >
+        {/* Üst Başlık, 7 Günlük Tarih Aralığı, Haftalık Toplam ve Geçen Haftayla Değişim Trendi */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-lg bg-[#18181c] border border-[#27272a] flex items-center justify-center text-[#0ea5e9] shrink-0">
+              <BarChart3 className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm sm:text-base font-bold text-[#f4f4f5] whitespace-nowrap">
+                  Haftalık Özet
+                </h2>
+                <span aria-hidden="true" className="text-[#52525b]">
+                  ·
+                </span>
+                <span className="text-xs font-mono tabular-nums text-[#a1a1aa] whitespace-nowrap">
+                  {isAnchoredToToday ? 'Son 7 Gün' : '7 Günlük Pencere'} ({dateRangeLabel})
+                </span>
+                <span aria-hidden="true" className="text-[#52525b] hidden sm:inline">
+                  ·
+                </span>
+                <span className="text-xs text-[#71717a] hidden sm:inline whitespace-nowrap">
+                  İlk 3 kategori ({currentWeekCount} işlem)
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 ml-auto">
+            {/* Geçen Haftaya Göre Artış / Azalış Trend Göstergesi */}
+            {changePercent !== null && trendDirection !== 'no-prev' ? (
+              <div
+                data-testid="weekly-trend-indicator"
+                className={`flex items-center gap-1.5 text-xs font-mono tabular-nums whitespace-nowrap ${
+                  trendDirection === 'down'
+                    ? 'text-[#10b981]'
+                    : trendDirection === 'up'
+                    ? 'text-[#f59e0b]'
+                    : 'text-[#a1a1aa]'
+                }`}
+              >
+                {trendDirection === 'down' ? (
+                  <TrendingDown className="w-3.5 h-3.5 shrink-0" />
+                ) : trendDirection === 'up' ? (
+                  <TrendingUp className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Minus className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>
+                  {trendDirection === 'down'
+                    ? `Geçen haftaya göre %${Math.abs(changePercent).toFixed(1)} azalış`
+                    : trendDirection === 'up'
+                    ? `Geçen haftaya göre +%${changePercent.toFixed(1)} artış`
+                    : 'Geçen haftayla aynı düzeyde'}
+                </span>
+              </div>
+            ) : (
+              <span
+                data-testid="weekly-trend-indicator"
+                className="text-xs text-[#71717a] font-mono tabular-nums whitespace-nowrap"
+              >
+                Önceki 7 gün verisi yok
+              </span>
+            )}
+
+            <span aria-hidden="true" className="text-[#27272a] hidden sm:inline">
+              |
+            </span>
+
+            <div className="text-right font-mono tabular-nums whitespace-nowrap">
+              <span className="text-xs text-[#a1a1aa] mr-1.5">7 Günlük Toplam:</span>
+              <span className="text-sm sm:text-base font-bold text-[#f4f4f5]">
+                {formatCurrency(
+                  currentWeekTotalTRY,
+                  displayCurrency,
+                  rates,
+                  false,
+                  isPrivacyMode
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Renkli Orantılı Mini Dağılım Çubuğu */}
+        <div
+          data-testid="weekly-summary-bar"
+          aria-label="Haftalık kategori oran çubuğu"
+          className="w-full h-2 bg-[#18181c] rounded-full overflow-hidden flex gap-0.5"
+        >
+          {topCategories.map((item) => (
+            <div
+              key={item.category}
+              title={`${item.category}: %${item.percentage.toFixed(1)}`}
+              className="h-full first:rounded-l-full last:rounded-r-full transition-all duration-200"
+              style={{
+                width: `${Math.max(4, item.percentage)}%`,
+                backgroundColor: item.color,
+              }}
+            />
+          ))}
+          {otherPercentage > 0 && (
+            <div
+              title={`Diğer Kategoriler: %${otherPercentage.toFixed(1)}`}
+              className="h-full bg-[#3f3f46] last:rounded-r-full transition-all duration-200"
+              style={{
+                width: `${Math.max(3, otherPercentage)}%`,
+              }}
+            />
+          )}
+        </div>
+
+        {/* İlk 3 Kategori Etkileşimli Kartları (Tıklandığında Listeyi Filtreler) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+          {topCategories.map((item, idx) => {
+            const isSelected = activeCategory === item.category;
+            const rankLabel = `0${idx + 1}.`;
+            const formattedPrevAmount = formatCurrency(
+              item.previousWeekTotalTRY,
+              displayCurrency,
+              rates,
+              false,
+              isPrivacyMode
+            );
+            const trendTooltip =
+              item.previousWeekTotalTRY > 0
+                ? `Önceki hafta (${formattedPrevAmount}) ile karşılaştırıldığında ${
+                    item.trendDirection === 'down'
+                      ? `%${Math.abs(item.changePercent).toFixed(1)} azalış`
+                      : item.trendDirection === 'up'
+                      ? `+%${item.changePercent.toFixed(1)} artış`
+                      : 'aynı düzeyde'
+                  }`
+                : 'Önceki 7 günde bu kategoride harcama yoktu (+%100 artış)';
+
+            return (
+              <button
+                key={item.category}
+                type="button"
+                data-testid={`weekly-top-category-${idx + 1}`}
+                aria-pressed={isSelected}
+                onClick={() => onSelectCategory(item.category)}
+                className={`w-full text-left px-3.5 py-2.5 rounded-lg border transition-colors flex items-center justify-between gap-3 cursor-pointer ${
+                  isSelected
+                    ? 'bg-[#1c1c22] border-[#0ea5e9] ring-1 ring-[#0ea5e9]/40'
+                    : 'bg-[#16161a] border-[#242429] hover:border-[#3f3f46]'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="text-xs font-mono tabular-nums text-[#71717a] shrink-0">
+                    {rankLabel}
+                  </span>
+                  <span
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    style={{ backgroundColor: item.color }}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-sm font-semibold text-[#f4f4f5] truncate">
+                        {item.category}
+                      </span>
+                      <span
+                        data-testid={`weekly-category-trend-${idx + 1}`}
+                        title={trendTooltip}
+                        className={`inline-flex items-center gap-0.5 text-xs font-mono tabular-nums font-medium shrink-0 ${
+                          item.trendDirection === 'down'
+                            ? 'text-[#10b981]'
+                            : item.trendDirection === 'up'
+                            ? 'text-[#f59e0b]'
+                            : 'text-[#a1a1aa]'
+                        }`}
+                      >
+                        {item.trendDirection === 'down' ? (
+                          <ArrowDownRight className="w-3.5 h-3.5 shrink-0" />
+                        ) : item.trendDirection === 'up' ? (
+                          <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                        ) : (
+                          <Minus className="w-3 h-3 shrink-0" />
+                        )}
+                        <span>
+                          {item.trendDirection === 'down'
+                            ? `-%${Math.abs(item.changePercent).toFixed(1)}`
+                            : item.trendDirection === 'up'
+                            ? `+%${item.changePercent.toFixed(1)}`
+                            : '%0.0'}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="text-xs text-[#a1a1aa] flex items-center gap-1.5 mt-0.5 whitespace-nowrap">
+                      <span>{item.count} işlem</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono tabular-nums">%{item.percentage.toFixed(1)}</span>
+                      {isSelected && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-[#0ea5e9] font-medium">Filtre Aktif</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-right font-mono tabular-nums shrink-0">
+                  <div className="text-sm font-bold text-[#f4f4f5]">
+                    {formatCurrency(
+                      item.totalTRY,
+                      displayCurrency,
+                      rates,
+                      false,
+                      isPrivacyMode
+                    )}
+                  </div>
+                  <div className="text-[11px] text-[#71717a] mt-0.5">
+                    Önceki hf: {formattedPrevAmount}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  }
 
   // Pozitif harcamaları dağılım yüzdesinde baz al
   const positiveExpenses = expenses.filter((e) => e.amountInTRY > 0);
@@ -198,6 +488,257 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
   return (
     <div data-testid="analytics-view" className="space-y-8">
+      {/* 0. BLOK: AY SONU PROJEKSİYONU (Harcama Alışkanlığı ve Günlük Tempo Analizi) */}
+      <section
+        aria-label="Ay Sonu Projeksiyonu"
+        data-testid="month-end-projection-card"
+        className="bg-[#111114] border border-[#222226] rounded-2xl p-6 sm:p-8 space-y-6"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-[#222226]">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-[#18181c] border border-[#27272a] flex items-center justify-center text-[#0ea5e9] shrink-0">
+              <CalendarClock className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold text-[#f4f4f5]">
+                  Ay Sonu Projeksiyonu
+                </h2>
+                <span aria-hidden="true" className="text-[#52525b]">
+                  ·
+                </span>
+                <span className="text-sm font-mono tabular-nums text-[#a1a1aa]">
+                  {monthProjection.monthLabel}
+                </span>
+              </div>
+              <p className="text-sm text-[#a1a1aa] mt-0.5">
+                Mevcut harcama alışkanlığınız ({monthProjection.elapsedDays}/{monthProjection.totalDaysInMonth} gün) ve kalan {monthProjection.remainingDays} günün temposuna göre tahmini ay sonu kapanışı.
+              </p>
+            </div>
+          </div>
+
+          <div
+            data-testid="projection-pace-status"
+            className={`flex items-center gap-2 text-xs sm:text-sm font-mono tabular-nums whitespace-nowrap ${
+              monthProjection.paceStatus === 'cooling'
+                ? 'text-[#10b981]'
+                : monthProjection.paceStatus === 'accelerating'
+                ? 'text-[#f59e0b]'
+                : 'text-[#0ea5e9]'
+            }`}
+          >
+            <Activity className="w-4 h-4 shrink-0" />
+            <span>
+              {monthProjection.paceStatus === 'cooling'
+                ? 'Son günlerde harcama temposu yavaşladı'
+                : monthProjection.paceStatus === 'accelerating'
+                ? 'Son günlerde harcama temposu hızlandı'
+                : 'Dengeli günlük harcama temposu'}
+            </span>
+          </div>
+        </div>
+
+        {/* 4 Sütunlu Ay Sonu Projeksiyon Metrikleri */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          {/* 1. Tahmini Ay Sonu Toplamı */}
+          <div className="bg-[#16161a] border border-[#242429] rounded-xl p-4 flex flex-col justify-between">
+            <div className="text-xs font-medium text-[#a1a1aa]">
+              Tahmini Ay Sonu Toplamı
+            </div>
+            <div
+              data-testid="projected-month-end-total"
+              className="mt-2 text-xl sm:text-2xl font-bold font-mono tabular-nums text-[#f4f4f5]"
+            >
+              {formatCurrency(
+                monthProjection.projectedMonthEndTRY,
+                displayCurrency,
+                rates,
+                false,
+                isPrivacyMode
+              )}
+            </div>
+            <div className="mt-1.5 text-xs text-[#71717a] font-mono tabular-nums">
+              +{formatCurrency(
+                monthProjection.projectedHabitRemainingTRY,
+                displayCurrency,
+                rates,
+                false,
+                isPrivacyMode
+              )}{' '}
+              kalan {monthProjection.remainingDays} gün tahmini
+            </div>
+          </div>
+
+          {/* 2. Şu Ana Kadar Gerçekleşen */}
+          <div className="bg-[#16161a] border border-[#242429] rounded-xl p-4 flex flex-col justify-between">
+            <div className="text-xs font-medium text-[#a1a1aa]">
+              Şu Ana Kadar Gerçekleşen
+            </div>
+            <div className="mt-2 text-lg sm:text-xl font-bold font-mono tabular-nums text-[#10b981]">
+              {formatCurrency(
+                monthProjection.currentTotalTRY,
+                displayCurrency,
+                rates,
+                false,
+                isPrivacyMode
+              )}
+            </div>
+            <div className="mt-1.5 text-xs text-[#71717a] font-mono tabular-nums">
+              {monthProjection.elapsedDays} günde {monthProjection.transactionCount} işlem (%{monthProjection.realizedSharePercent.toFixed(1)})
+            </div>
+          </div>
+
+          {/* 3. Günlük Harcama Alışkanlığı */}
+          <div className="bg-[#16161a] border border-[#242429] rounded-xl p-4 flex flex-col justify-between">
+            <div className="text-xs font-medium text-[#a1a1aa]">
+              Günlük Ortalama Alışkanlık
+            </div>
+            <div className="mt-2 text-lg sm:text-xl font-bold font-mono tabular-nums text-[#0ea5e9]">
+              {formatCurrency(
+                monthProjection.dailyAverageTRY,
+                displayCurrency,
+                rates,
+                false,
+                isPrivacyMode
+              )}
+              <span className="text-xs font-normal text-[#a1a1aa]"> / gün</span>
+            </div>
+            <div className="mt-1.5 text-xs text-[#71717a] font-mono tabular-nums">
+              {monthProjection.activeSpendingDays} aktif harcama günü
+              {monthProjection.pendingRemindersCount > 0
+                ? ` · +${monthProjection.pendingRemindersCount} planlı ödeme`
+                : ''}
+            </div>
+          </div>
+
+          {/* 4. En Baskın Kategori Tahmini */}
+          {monthProjection.topProjectedCategory ? (
+            <button
+              type="button"
+              onClick={() =>
+                onSelectCategory(monthProjection.topProjectedCategory!.category)
+              }
+              className="bg-[#16161a] border border-[#242429] hover:border-[#3f3f46] rounded-xl p-4 flex flex-col justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-[#a1a1aa]">
+                  En Baskın Kategori Tahmini
+                </span>
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: monthProjection.topProjectedCategory.color }}
+                />
+              </div>
+              <div className="mt-2 flex items-baseline justify-between gap-2">
+                <span className="text-base font-bold text-[#f4f4f5] truncate">
+                  {monthProjection.topProjectedCategory.category}
+                </span>
+                <span className="text-sm font-bold font-mono tabular-nums text-[#f4f4f5] shrink-0">
+                  {formatCurrency(
+                    monthProjection.topProjectedCategory.projectedTotalTRY,
+                    displayCurrency,
+                    rates,
+                    false,
+                    isPrivacyMode
+                  )}
+                </span>
+              </div>
+              <div className="mt-1.5 text-xs text-[#71717a] font-mono tabular-nums">
+                Şu an: {formatCurrency(
+                  monthProjection.topProjectedCategory.currentTRY,
+                  displayCurrency,
+                  rates,
+                  false,
+                  isPrivacyMode
+                )}{' '}
+                (%{monthProjection.topProjectedCategory.sharePercent.toFixed(1)})
+              </div>
+            </button>
+          ) : (
+            <div className="bg-[#16161a] border border-[#242429] rounded-xl p-4 flex flex-col justify-between">
+              <div className="text-xs font-medium text-[#a1a1aa]">
+                En Baskın Kategori Tahmini
+              </div>
+              <div className="mt-2 text-sm text-[#71717a]">
+                Henüz yeterli kategori verisi yok
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Gerçekleşen + Kalan Gün Alışkanlık Tahmini + Planlı Ödemeler İlerleme Çubuğu */}
+        <div className="space-y-2.5">
+          <div
+            data-testid="month-end-projection-bar"
+            className="w-full h-2.5 bg-[#18181c] rounded-full overflow-hidden flex gap-0.5"
+          >
+            {monthProjection.realizedSharePercent > 0 && (
+              <div
+                title={`Gerçekleşen: %${monthProjection.realizedSharePercent.toFixed(1)}`}
+                className="h-full bg-[#10b981] first:rounded-l-full last:rounded-r-full transition-all duration-200"
+                style={{
+                  width: `${Math.max(4, monthProjection.realizedSharePercent)}%`,
+                }}
+              />
+            )}
+            {monthProjection.habitRemainingSharePercent > 0 && (
+              <div
+                title={`Alışkanlık Tahmini (${monthProjection.remainingDays} gün): %${monthProjection.habitRemainingSharePercent.toFixed(1)}`}
+                className="h-full bg-[#0ea5e9]/75 first:rounded-l-full last:rounded-r-full transition-all duration-200"
+                style={{
+                  width: `${Math.max(4, monthProjection.habitRemainingSharePercent)}%`,
+                }}
+              />
+            )}
+            {monthProjection.remindersSharePercent > 0 && (
+              <div
+                title={`Bekleyen Planlı Ödemeler: %${monthProjection.remindersSharePercent.toFixed(1)}`}
+                className="h-full bg-[#f59e0b] first:rounded-l-full last:rounded-r-full transition-all duration-200"
+                style={{
+                  width: `${Math.max(3, monthProjection.remindersSharePercent)}%`,
+                }}
+              />
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[#a1a1aa]">
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-[#10b981]" />
+                <span>Gerçekleşen (%{monthProjection.realizedSharePercent.toFixed(1)})</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-[#0ea5e9]" />
+                <span>
+                  Alışkanlığa Göre Kalan {monthProjection.remainingDays} Gün (%{monthProjection.habitRemainingSharePercent.toFixed(1)})
+                </span>
+              </span>
+              {monthProjection.pendingRemindersTRY > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#f59e0b]" />
+                  <span>
+                    Planlı Bekleyen Ödemeler:{' '}
+                    <strong className="font-mono tabular-nums text-[#f4f4f5]">
+                      {formatCurrency(
+                        monthProjection.pendingRemindersTRY,
+                        displayCurrency,
+                        rates,
+                        false,
+                        isPrivacyMode
+                      )}
+                    </strong>
+                  </span>
+                </span>
+              )}
+            </div>
+
+            <span className="font-mono tabular-nums text-[#71717a]">
+              Gün {monthProjection.elapsedDays} / {monthProjection.totalDaysInMonth}
+            </span>
+          </div>
+        </div>
+      </section>
+
       {/* 1. BLOK: KATEGORİ BAZLI HARCAMA DAĞILIMI (SubTrack Referans Düzeni) */}
       <section className="bg-[#111114] border border-[#222226] rounded-2xl p-6 sm:p-8">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-[#222226]">
@@ -216,7 +757,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           </div>
 
           <div className="px-4 py-2 rounded-xl bg-[#18181c] border border-[#27272a] text-sm font-mono tabular-nums text-[#f4f4f5]">
-            Toplam: <span className="font-bold">{formatCurrency(totalPositiveTRY, displayCurrency, rates)}</span>
+            Toplam: <span className="font-bold">{formatCurrency(totalPositiveTRY, displayCurrency, rates, false, isPrivacyMode)}</span>
           </div>
         </div>
 
@@ -234,6 +775,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                 centerSubtitle="/ dönem"
                 displayCurrency={displayCurrency}
                 rates={rates}
+                isPrivacyMode={isPrivacyMode}
                 hoveredId={hoveredCat}
                 onHover={setHoveredCat}
                 onClickSlice={(cat) => onSelectCategory(cat as ExpenseCategory)}
@@ -274,7 +816,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
                     <div className="text-right font-mono tabular-nums shrink-0">
                       <div className="text-base font-bold text-[#f4f4f5]">
-                        {formatCurrency(item.totalTRY, displayCurrency, rates)}
+                        {formatCurrency(item.totalTRY, displayCurrency, rates, false, isPrivacyMode)}
                       </div>
                       <div className="text-xs text-[#a1a1aa] mt-0.5">
                         %{item.percentage.toFixed(1)}
@@ -324,9 +866,10 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                 centerSubtitle={`${tagSlices.length} etiket`}
                 displayCurrency={displayCurrency}
                 rates={rates}
+                isPrivacyMode={isPrivacyMode}
                 hoveredId={hoveredTag}
                 onHover={setHoveredTag}
-                onClickSlice={(tag) => onSelectTag(tag)}
+                onClickSlice={(tag) => onSelectTag?.(tag)}
               />
             </div>
 
@@ -340,7 +883,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     type="button"
                     onMouseEnter={() => setHoveredTag(item.id)}
                     onMouseLeave={() => setHoveredTag(null)}
-                    onClick={() => onSelectTag(item.id)}
+                    onClick={() => onSelectTag?.(item.id)}
                     className={`w-full text-left p-4 rounded-xl border transition-all cursor-pointer ${
                       isHovered
                         ? 'bg-[#1c1c22] border-[#3f3f46]'
@@ -367,7 +910,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
                     <div className="flex items-baseline justify-between gap-2 font-mono tabular-nums mb-2">
                       <span className="text-base font-bold text-[#f4f4f5]">
-                        {formatCurrency(item.totalTRY, displayCurrency, rates)}
+                        {formatCurrency(item.totalTRY, displayCurrency, rates, false, isPrivacyMode)}
                       </span>
                       <span className="text-xs text-[#a1a1aa]">
                         %{item.percentage.toFixed(1)}

@@ -102,6 +102,45 @@ export interface UserProfile {
   mode: 'guest' | 'google';
 }
 
+export type ReminderStatus = 'pending' | 'paid';
+export type ReminderRecurrence = 'once' | 'monthly' | 'yearly';
+export type ReminderUrgency = 'overdue' | 'today' | 'upcoming' | 'paid';
+
+export interface PaymentReminder {
+  id: string;
+  userId?: string;
+  title: string;
+  amount: number;
+  currency: CurrencyCode;
+  amountInTRY: number;
+  category: ExpenseCategory;
+  tags: string[];
+  dueDate: string; // YYYY-MM-DD
+  recurrence: ReminderRecurrence;
+  status: ReminderStatus;
+  notes?: string;
+  paidAt?: string;
+  paidExpenseId?: string;
+  createdAt?: string;
+}
+
+export interface ExtractedReminder {
+  title: string;
+  amount: number;
+  currency: CurrencyCode;
+  amountInTRY: number;
+  category: ExpenseCategory;
+  tags: string[];
+  dueDate: string; // YYYY-MM-DD
+  recurrence: ReminderRecurrence;
+  notes?: string;
+}
+
+export interface MarkedReminderCandidate extends ExtractedReminder {
+  tempId: string;
+  selected: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -110,6 +149,8 @@ export interface ChatMessage {
   attachmentNames?: string[];
   proposedExpenses?: MarkedCandidate[];
   savedSuccess?: boolean;
+  proposedReminders?: MarkedReminderCandidate[];
+  remindersSavedSuccess?: boolean;
   analysisHighlight?: {
     label: string;
     totalTRY: number;

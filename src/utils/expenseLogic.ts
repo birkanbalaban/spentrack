@@ -9,6 +9,7 @@ import {
   FIXED_CATEGORIES,
   MarkedCandidate,
   MetricsSummary,
+  PaymentReminder,
 } from '../types';
 
 /**
@@ -389,21 +390,27 @@ export function formatCurrency(
   amountInTRY: number,
   displayCurrency: CurrencyCode = 'TRY',
   rates?: CurrencyRates | null,
-  showExplicitSign = false
+  showExplicitSign = false,
+  isPrivacyMode = false
 ): string {
-  const converted = convertFromTRY(amountInTRY, displayCurrency, rates);
   const symbols: Record<CurrencyCode, string> = {
     TRY: '₺',
     USD: '$',
     EUR: '€',
     GBP: '£',
   };
+  const symbol = symbols[displayCurrency] || '₺';
+
+  if (isPrivacyMode) {
+    return `**** ${symbol}`;
+  }
+
+  const converted = convertFromTRY(amountInTRY, displayCurrency, rates);
   const absFormatted = new Intl.NumberFormat('tr-TR', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(Math.abs(converted));
 
-  const symbol = symbols[displayCurrency] || '₺';
   if (converted < 0) {
     return `-${absFormatted} ${symbol}`;
   }
@@ -411,6 +418,21 @@ export function formatCurrency(
     return `+${absFormatted} ${symbol}`;
   }
   return `${absFormatted} ${symbol}`;
+}
+
+export function maskMonetaryText(text: string, isPrivacyMode: boolean): string {
+  if (!isPrivacyMode || !text) return text;
+  // Ön ek para birimi sembolleri (örn. $450.00, ₺1.250,50, -€120)
+  let masked = text.replace(
+    /(?:[+-]\s*)?([₺$€£])\s*(\d[\d.,]*)/g,
+    '**** $1'
+  );
+  // Son ek para birimi sembolü veya kodu (örn. 1.250,50 TL, 420 ₺, -560,00 TRY)
+  masked = masked.replace(
+    /(?:[+-]\s*)?(\d[\d.,]*)\s*(TL|TRY|USD|EUR|GBP|₺|\$|€|£)(?=\s|$|[.,;:!?)])/gi,
+    (_m, _num, curr) => `**** ${curr}`
+  );
+  return masked;
 }
 
 /**
@@ -1021,5 +1043,383 @@ export function buildDraftExpenseFromPrompt(
     notes: '',
   };
 }
+
+export interface WeeklyCategorySummaryItem {
+  category: ExpenseCategory;
+  totalTRY: number;
+  previousWeekTotalTRY: number;
+  changePercent: number;
+  trendDirection: 'up' | 'down' | 'flat';
+  count: number;
+  percentage: number;
+  color: string;
+}
+
+export interface WeeklyCategorySummary {
+  startDateISO: string;
+  endDateISO: string;
+  dateRangeLabel: string;
+  isAnchoredToToday: boolean;
+  currentWeekTotalTRY: number;
+  currentWeekCount: number;
+  previousWeekTotalTRY: number;
+  changePercent: number | null;
+  trendDirection: 'up' | 'down' | 'flat' | 'no-prev';
+  topCategories: WeeklyCategorySummaryItem[];
+  otherTotalTRY: number;
+  otherPercentage: number;
+}
+
+function shiftDateISO(dateISO: string, deltaDays: number): string {
+  const d = new Date(`${dateISO}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return dateISO;
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+function formatShortDayMonthTR(dateISO: string): string {
+  const months = [
+    'Oca',
+    'Şub',
+    'Mar',
+    'Nis',
+    'May',
+    'Haz',
+    'Tem',
+    'Ağu',
+    'Eyl',
+    'Eki',
+    'Kas',
+    'Ara',
+  ];
+  const parts = dateISO.split('-');
+  if (parts.length !== 3) return dateISO;
+  const monthIdx = parseInt(parts[1], 10) - 1;
+  const dayNum = parseInt(parts[2], 10);
+  if (Number.isNaN(monthIdx) || Number.isNaN(dayNum) || monthIdx < 0 || monthIdx > 11) {
+    return dateISO;
+  }
+  return `${dayNum} ${months[monthIdx]}`;
+}
+
+export function calculateWeeklyCategorySummary(
+  expenses: Expense[],
+  referenceDateISO?: string
+): WeeklyCategorySummary {
+  const today = referenceDateISO || new Date().toISOString().slice(0, 10);
+  const positiveExpenses = expenses.filter(
+    (e) => e.amountInTRY > 0 && /^\d{4}-\d{2}-\d{2}$/.test(e.date)
+  );
+
+  const literalStart = shiftDateISO(today, -6);
+  const hasRecentInLiteralWindow = positiveExpenses.some(
+    (e) => e.date >= literalStart && e.date <= today
+  );
+
+  let anchorEndISO = today;
+  let isAnchoredToToday = true;
+
+  if (!hasRecentInLiteralWindow && positiveExpenses.length > 0) {
+    const sortedDates = positiveExpenses.map((e) => e.date).sort();
+    anchorEndISO = sortedDates[sortedDates.length - 1];
+    isAnchoredToToday = anchorEndISO === today;
+  }
+
+  const startDateISO = shiftDateISO(anchorEndISO, -6);
+  const prevEndISO = shiftDateISO(anchorEndISO, -7);
+  const prevStartISO = shiftDateISO(anchorEndISO, -13);
+
+  const currentWeekItems = positiveExpenses.filter(
+    (e) => e.date >= startDateISO && e.date <= anchorEndISO
+  );
+  const previousWeekItems = positiveExpenses.filter(
+    (e) => e.date >= prevStartISO && e.date <= prevEndISO
+  );
+
+  const currentWeekTotalTRY =
+    Math.round(currentWeekItems.reduce((sum, e) => sum + e.amountInTRY, 0) * 100) / 100;
+  const previousWeekTotalTRY =
+    Math.round(previousWeekItems.reduce((sum, e) => sum + e.amountInTRY, 0) * 100) / 100;
+
+  let changePercent: number | null = null;
+  let trendDirection: WeeklyCategorySummary['trendDirection'] = 'no-prev';
+
+  if (previousWeekTotalTRY > 0) {
+    changePercent =
+      Math.round(
+        (((currentWeekTotalTRY - previousWeekTotalTRY) / previousWeekTotalTRY) * 100) * 10
+      ) / 10;
+    if (changePercent > 0.5) {
+      trendDirection = 'up';
+    } else if (changePercent < -0.5) {
+      trendDirection = 'down';
+    } else {
+      trendDirection = 'flat';
+    }
+  }
+
+  const allCategoryTotals: WeeklyCategorySummaryItem[] = FIXED_CATEGORIES.map((cat) => {
+    const items = currentWeekItems.filter((e) => e.category === cat);
+    const prevItems = previousWeekItems.filter((e) => e.category === cat);
+    const totalTRY = Math.round(items.reduce((sum, e) => sum + e.amountInTRY, 0) * 100) / 100;
+    const prevCatTotalTRY =
+      Math.round(prevItems.reduce((sum, e) => sum + e.amountInTRY, 0) * 100) / 100;
+    const percentage =
+      currentWeekTotalTRY > 0
+        ? Math.round(((totalTRY / currentWeekTotalTRY) * 100) * 10) / 10
+        : 0;
+
+    let catChangePercent = 0;
+    let catTrendDirection: WeeklyCategorySummaryItem['trendDirection'] = 'flat';
+
+    if (prevCatTotalTRY > 0) {
+      catChangePercent =
+        Math.round((((totalTRY - prevCatTotalTRY) / prevCatTotalTRY) * 100) * 10) / 10;
+      if (catChangePercent > 0.5) {
+        catTrendDirection = 'up';
+      } else if (catChangePercent < -0.5) {
+        catTrendDirection = 'down';
+      } else {
+        catTrendDirection = 'flat';
+      }
+    } else if (totalTRY > 0) {
+      catChangePercent = 100;
+      catTrendDirection = 'up';
+    }
+
+    return {
+      category: cat,
+      totalTRY,
+      previousWeekTotalTRY: prevCatTotalTRY,
+      changePercent: catChangePercent,
+      trendDirection: catTrendDirection,
+      count: items.length,
+      percentage,
+      color: getCategoryColor(cat),
+    };
+  })
+    .filter((c) => c.totalTRY > 0)
+    .sort((a, b) => b.totalTRY - a.totalTRY);
+
+  const topCategories = allCategoryTotals.slice(0, 3);
+  const top3SumTRY = topCategories.reduce((sum, c) => sum + c.totalTRY, 0);
+  const otherTotalTRY = Math.max(0, Math.round((currentWeekTotalTRY - top3SumTRY) * 100) / 100);
+  const otherPercentage =
+    currentWeekTotalTRY > 0
+      ? Math.max(0, Math.round(((otherTotalTRY / currentWeekTotalTRY) * 100) * 10) / 10)
+      : 0;
+
+  return {
+    startDateISO,
+    endDateISO: anchorEndISO,
+    dateRangeLabel: `${formatShortDayMonthTR(startDateISO)} – ${formatShortDayMonthTR(anchorEndISO)}`,
+    isAnchoredToToday,
+    currentWeekTotalTRY,
+    currentWeekCount: currentWeekItems.length,
+    previousWeekTotalTRY,
+    changePercent,
+    trendDirection,
+    topCategories,
+    otherTotalTRY,
+    otherPercentage,
+  };
+}
+
+export interface MonthEndHabitProjection {
+  targetMonthYear: string;
+  monthLabel: string;
+  totalDaysInMonth: number;
+  elapsedDays: number;
+  remainingDays: number;
+  activeSpendingDays: number;
+  transactionCount: number;
+  currentTotalTRY: number;
+  dailyAverageTRY: number;
+  projectedHabitRemainingTRY: number;
+  pendingRemindersTRY: number;
+  pendingRemindersCount: number;
+  projectedMonthEndTRY: number;
+  realizedSharePercent: number;
+  habitRemainingSharePercent: number;
+  remindersSharePercent: number;
+  paceStatus: 'accelerating' | 'steady' | 'cooling';
+  topProjectedCategory: {
+    category: ExpenseCategory;
+    currentTRY: number;
+    projectedTotalTRY: number;
+    sharePercent: number;
+    color: string;
+  } | null;
+}
+
+const FULL_MONTH_NAMES_TR = [
+  'Ocak',
+  'Şubat',
+  'Mart',
+  'Nisan',
+  'Mayıs',
+  'Haziran',
+  'Temmuz',
+  'Ağustos',
+  'Eylül',
+  'Ekim',
+  'Kasım',
+  'Aralık',
+];
+
+export function calculateMonthEndHabitProjection(
+  expenses: Expense[],
+  options?: {
+    monthYear?: string;
+    referenceDateISO?: string;
+    reminders?: PaymentReminder[];
+  }
+): MonthEndHabitProjection {
+  const todayISO = options?.referenceDateISO || new Date().toISOString().slice(0, 10);
+  const reminders = options?.reminders || [];
+  const positiveExpenses = expenses.filter(
+    (e) => e.amountInTRY > 0 && /^\d{4}-\d{2}-\d{2}$/.test(e.date)
+  );
+
+  let targetMonthYear =
+    options?.monthYear && options.monthYear !== 'ALL'
+      ? options.monthYear
+      : todayISO.slice(0, 7);
+
+  if (
+    (!options?.monthYear || options.monthYear === 'ALL') &&
+    positiveExpenses.length > 0 &&
+    !positiveExpenses.some((e) => e.date.startsWith(targetMonthYear))
+  ) {
+    const sortedMonths = positiveExpenses.map((e) => e.date.slice(0, 7)).sort();
+    targetMonthYear = sortedMonths[sortedMonths.length - 1];
+  }
+
+  const [yearStr, monthStr] = targetMonthYear.split('-');
+  const yearNum = parseInt(yearStr, 10) || 2026;
+  const monthNum = parseInt(monthStr, 10) || 11;
+  const totalDaysInMonth = new Date(Date.UTC(yearNum, monthNum, 0)).getUTCDate();
+  const monthLabel = `${FULL_MONTH_NAMES_TR[Math.max(0, Math.min(11, monthNum - 1))]} ${yearNum}`;
+
+  const monthExpenses = positiveExpenses.filter((e) => e.date.startsWith(targetMonthYear));
+
+  let elapsedDays = totalDaysInMonth;
+  if (targetMonthYear === todayISO.slice(0, 7)) {
+    const todayDay = parseInt(todayISO.slice(8, 10), 10) || 1;
+    elapsedDays = Math.max(1, Math.min(totalDaysInMonth, todayDay));
+  } else if (monthExpenses.length > 0) {
+    const maxDay = Math.max(
+      ...monthExpenses.map((e) => parseInt(e.date.slice(8, 10), 10) || 1)
+    );
+    elapsedDays = Math.max(1, Math.min(totalDaysInMonth, maxDay));
+  }
+
+  const remainingDays = Math.max(0, totalDaysInMonth - elapsedDays);
+  const activeSpendingDays = new Set(monthExpenses.map((e) => e.date)).size;
+  const currentTotalTRY =
+    Math.round(monthExpenses.reduce((sum, e) => sum + e.amountInTRY, 0) * 100) / 100;
+
+  const dailyAverageTRY =
+    elapsedDays > 0 ? Math.round((currentTotalTRY / elapsedDays) * 100) / 100 : 0;
+
+  const projectedHabitRemainingTRY =
+    Math.round(dailyAverageTRY * remainingDays * 100) / 100;
+
+  const monthPendingReminders = reminders.filter(
+    (r) =>
+      r.status === 'pending' &&
+      r.amountInTRY > 0 &&
+      r.dueDate.startsWith(targetMonthYear)
+  );
+  const pendingRemindersTRY =
+    Math.round(
+      monthPendingReminders.reduce((sum, r) => sum + r.amountInTRY, 0) * 100
+    ) / 100;
+
+  const projectedMonthEndTRY =
+    Math.round(
+      (currentTotalTRY + projectedHabitRemainingTRY + pendingRemindersTRY) * 100
+    ) / 100;
+
+  const realizedSharePercent =
+    projectedMonthEndTRY > 0
+      ? Math.round(((currentTotalTRY / projectedMonthEndTRY) * 100) * 10) / 10
+      : 0;
+  const habitRemainingSharePercent =
+    projectedMonthEndTRY > 0
+      ? Math.round(((projectedHabitRemainingTRY / projectedMonthEndTRY) * 100) * 10) / 10
+      : 0;
+  const remindersSharePercent =
+    projectedMonthEndTRY > 0
+      ? Math.round(((pendingRemindersTRY / projectedMonthEndTRY) * 100) * 10) / 10
+      : 0;
+
+  // Son 7 günün günlük ortalaması ile ay genelinin günlük ortalamasını kıyasla
+  const anchorDayStr = `${targetMonthYear}-${String(elapsedDays).padStart(2, '0')}`;
+  const recentWindowDays = Math.min(7, elapsedDays);
+  const recentStartISO = shiftDateISO(anchorDayStr, -(recentWindowDays - 1));
+  const recentTotalTRY = monthExpenses
+    .filter((e) => e.date >= recentStartISO && e.date <= anchorDayStr)
+    .reduce((sum, e) => sum + e.amountInTRY, 0);
+  const recentDailyAvg = recentWindowDays > 0 ? recentTotalTRY / recentWindowDays : 0;
+
+  let paceStatus: MonthEndHabitProjection['paceStatus'] = 'steady';
+  if (dailyAverageTRY > 0 && elapsedDays >= 4) {
+    const ratio = recentDailyAvg / dailyAverageTRY;
+    if (ratio > 1.15) {
+      paceStatus = 'accelerating';
+    } else if (ratio < 0.85) {
+      paceStatus = 'cooling';
+    }
+  }
+
+  const categoryTotals = FIXED_CATEGORIES.map((cat) => {
+    const currentTRY =
+      Math.round(
+        monthExpenses
+          .filter((e) => e.category === cat)
+          .reduce((sum, e) => sum + e.amountInTRY, 0) * 100
+      ) / 100;
+    const catDaily = elapsedDays > 0 ? currentTRY / elapsedDays : 0;
+    const projectedTotalTRY =
+      Math.round((currentTRY + catDaily * remainingDays) * 100) / 100;
+    const sharePercent =
+      currentTotalTRY > 0
+        ? Math.round(((currentTRY / currentTotalTRY) * 100) * 10) / 10
+        : 0;
+    return {
+      category: cat,
+      currentTRY,
+      projectedTotalTRY,
+      sharePercent,
+      color: getCategoryColor(cat),
+    };
+  })
+    .filter((c) => c.currentTRY > 0)
+    .sort((a, b) => b.currentTRY - a.currentTRY);
+
+  return {
+    targetMonthYear,
+    monthLabel,
+    totalDaysInMonth,
+    elapsedDays,
+    remainingDays,
+    activeSpendingDays,
+    transactionCount: monthExpenses.length,
+    currentTotalTRY,
+    dailyAverageTRY,
+    projectedHabitRemainingTRY,
+    pendingRemindersTRY,
+    pendingRemindersCount: monthPendingReminders.length,
+    projectedMonthEndTRY,
+    realizedSharePercent,
+    habitRemainingSharePercent,
+    remindersSharePercent,
+    paceStatus,
+    topProjectedCategory: categoryTotals[0] || null,
+  };
+}
+
+
 
 

@@ -11,6 +11,7 @@ interface ExpenseListViewProps {
   groups: DateGroup[];
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
+  isPrivacyMode?: boolean;
   onEdit: (expense: Expense) => void;
   onDelete: (id: string) => void;
   onTagClick: (tag: string) => void;
@@ -22,6 +23,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
   groups,
   displayCurrency,
   rates,
+  isPrivacyMode = false,
   onEdit,
   onDelete,
   onTagClick,
@@ -81,7 +83,7 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
             <div className="text-xs sm:text-sm font-mono tabular-nums font-semibold text-[#a1a1aa] leading-tight">
               Gün Toplamı:{' '}
               <span className={group.dayTotalTRY < 0 ? 'text-[#10b981]' : 'text-[#f4f4f5]'}>
-                {formatCurrency(group.dayTotalTRY, displayCurrency, rates)}
+                {formatCurrency(group.dayTotalTRY, displayCurrency, rates, false, isPrivacyMode)}
               </span>
             </div>
           </div>
@@ -166,13 +168,15 @@ export const ExpenseListView: React.FC<ExpenseListViewProps> = ({
                           isRefund ? 'text-[#10b981]' : 'text-[#f4f4f5]'
                         }`}
                       >
-                        {isRefund
+                        {isPrivacyMode
+                          ? formatCurrency(item.amountInTRY, displayCurrency, rates, false, true)
+                          : isRefund
                           ? `+${formatCurrency(Math.abs(item.amountInTRY), displayCurrency, rates)}`
                           : `-${formatCurrency(item.amountInTRY, displayCurrency, rates)}`}
                       </div>
                       {item.currency !== displayCurrency && (
                         <div className="text-[11px] text-[#71717a]">
-                          Orijinal: {item.amount.toFixed(2)} {item.currency}
+                          Orijinal: {isPrivacyMode ? `**** ${item.currency}` : `${item.amount.toFixed(2)} ${item.currency}`}
                         </div>
                       )}
                     </div>

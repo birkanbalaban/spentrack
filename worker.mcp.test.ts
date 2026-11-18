@@ -157,5 +157,87 @@ test('initialize -> initialized -> tools/list with dev header x-user-id returns 
     'list_expenses',
     'get_financial_summary',
     'delete_expense',
+    'add_payment_reminder',
+    'list_payment_reminders',
+    'complete_payment_reminder',
   ]);
+});
+
+test('MCP add_payment_reminder -> list_payment_reminders -> complete_payment_reminder converts to expense and schedules next month', async () => {
+  const devHeaders = { 'x-user-id': 'synthetic-reminder-mcp-user' };
+
+  const addRes = await postMcp(
+    '/api/mcp',
+    {
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/call',
+      params: {
+        name: 'add_payment_reminder',
+        arguments: {
+          title: 'Site Aidatı',
+          amount: 5867.6,
+          currency: 'TRY',
+          dueDate: '2026-11-25',
+          recurrence: 'monthly',
+          tags: ['#aidat'],
+        },
+      },
+    },
+    devHeaders
+  );
+  assert.equal(addRes.status, 200);
+  const addData = (await addRes.json()) as {
+    result: { isError: boolean; data: { id: string } };
+  };
+  assert.equal(addData.result.isError, false);
+  const reminderId = addData.result.data.id;
+  assert.ok(reminderId);
+
+  const listRes = await postMcp(
+    '/api/mcp',
+    {
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'tools/call',
+      params: {
+        name: 'list_payment_reminders',
+        arguments: { status: 'pending' },
+      },
+    },
+    devHeaders
+  );
+  const listData = (await listRes.json()) as {
+    result: { isError: boolean; data: Array<{ id: string; title: string }> };
+  };
+  assert.equal(listData.result.isError, false);
+  assert.ok(listData.result.data.some((r) => r.id === reminderId));
+
+  const completeRes = await postMcp(
+    '/api/mcp',
+    {
+      jsonrpc: '2.0',
+      id: 12,
+      method: 'tools/call',
+      params: {
+        name: 'complete_payment_reminder',
+        arguments: { id: reminderId, paidDate: '2026-11-16' },
+      },
+    },
+    devHeaders
+  );
+  const completeData = (await completeRes.json()) as {
+    result: {
+      isError: boolean;
+      data: {
+        createdExpense: { title: string; amount: number; date: string };
+        nextReminder: { dueDate: string; status: string };
+      };
+    };
+  };
+  assert.equal(completeData.result.isError, false);
+  assert.equal(completeData.result.data.createdExpense.title, 'Site Aidatı');
+  assert.equal(completeData.result.data.createdExpense.amount, 5867.6);
+  assert.equal(completeData.result.data.nextReminder.dueDate, '2026-12-25');
+  assert.equal(completeData.result.data.nextReminder.status, 'pending');
 });

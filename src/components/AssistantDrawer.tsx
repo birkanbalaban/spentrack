@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   KeyRound,
   Loader2,
+  CalendarClock,
 } from 'lucide-react';
 import {
   ChatMessage,
@@ -14,15 +15,23 @@ import {
   CurrencyRates,
   Expense,
   ExtractedExpense,
+  ExtractedReminder,
   MarkedCandidate,
+  MarkedReminderCandidate,
+  PaymentReminder,
 } from '../types';
 import {
   buildDraftExpenseFromPrompt,
   detectDuplicates,
   formatCurrency,
+  maskMonetaryText,
   parseInstantAssistantMessage,
   parseTurkishAmount,
 } from '../utils/expenseLogic';
+import {
+  getRecurrenceLabel,
+  parseInstantReminderMessage,
+} from '../utils/reminderLogic';
 import { prepareFileForGemini, PreparedAttachment } from '../utils/imageCompressor';
 import {
   AccountApiKeyBox,
@@ -34,29 +43,35 @@ import { chatWithAssistantDirectClient } from '../utils/clientGeminiFallback';
 interface AssistantDrawerProps {
   isOpen: boolean;
   expenses: Expense[];
+  reminders?: PaymentReminder[];
   existingTags: string[];
   displayCurrency: CurrencyCode;
   rates: CurrencyRates | null;
+  isPrivacyMode?: boolean;
   customApiKey: string;
   isAuthenticated?: boolean;
   authHeaders?: Record<string, string>;
   onSaveApiKey: (key: string) => Promise<void>;
   onClose: () => void;
   onBatchSave: (items: ExtractedExpense[]) => Promise<void>;
+  onBatchSaveReminders?: (items: ExtractedReminder[]) => Promise<void>;
 }
 
 export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   isOpen,
   expenses,
+  reminders = [],
   existingTags,
   displayCurrency,
   rates,
+  isPrivacyMode = false,
   customApiKey,
   isAuthenticated = false,
   authHeaders = {},
   onSaveApiKey,
   onClose,
   onBatchSave,
+  onBatchSaveReminders,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -170,9 +185,36 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       onSaveApiKey(activeKey).catch(() => {});
     }
 
-    // Mesajda zaten tutar + açıklama yazılmışsa (dosya eki olsa bile veya olmasa da) 0ms'de anlık çözümle!
+    // Mesajda zaten harcama veya ileriye dönük hatırlatma varsa 0ms'de anlık çözümle!
     if (text) {
       const instantStart = performance.now();
+      if (currentAttachments.length === 0) {
+        const instantRem = parseInstantReminderMessage(text, reminders);
+        if (instantRem.handled) {
+          const instantMs = Math.round((performance.now() - instantStart) * 100) / 100;
+          console.info(
+            `[SpenTrack Perf] Client Assistant instant-reminder-nlp resolved in ${instantMs}ms (reminders=${instantRem.proposedReminders.length})`
+          );
+          const markedRems: MarkedReminderCandidate[] = instantRem.proposedReminders.map(
+            (r, idx) => ({
+              ...r,
+              tempId: `remcand_${Date.now()}_${idx}`,
+              selected: true,
+            })
+          );
+          const assistantMsg: ChatMessage = {
+            id: `ast_${Date.now() + 1}`,
+            role: 'assistant',
+            content: instantRem.reply,
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            proposedReminders: markedRems.length > 0 ? markedRems : undefined,
+            analysisHighlight: instantRem.analysisHighlight,
+          };
+          setMessages((prev) => [...prev, userMsg, assistantMsg]);
+          return;
+        }
+      }
+
       const instant = parseInstantAssistantMessage(text, expenses);
       if (instant.handled && (currentAttachments.length === 0 || instant.proposedExpenses.length > 0)) {
         const instantMs = Math.round((performance.now() - instantStart) * 100) / 100;
@@ -240,9 +282,10 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         reply?: string;
         analysisHighlight?: ChatMessage['analysisHighlight'];
         proposedExpenses?: ExtractedExpense[];
+        proposedReminders?: ExtractedReminder[];
       } | null = null;
 
-      const fetchTimeoutMs = payloadFiles.length > 0 ? 26000 : 14000;
+      const fetchTimeoutMs = payloadFiles.length > 0 ? 50000 : 30000;
       const reqStart = performance.now();
 
       const serverCall = async () => {
@@ -257,6 +300,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
               files: payloadFiles,
               // Görsel yüklenirken mevcut harcama listesini göndermeyerek yükü ve süreyi %85 azaltıyoruz
               existingExpenses: payloadFiles.length > 0 ? [] : expenses,
+              existingReminders: payloadFiles.length > 0 ? [] : reminders,
               existingTags: existingTags.slice(0, 30),
             }),
           });
@@ -290,6 +334,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             message: text,
             files: payloadFiles,
             existingExpenses: payloadFiles.length > 0 ? [] : expenses,
+            existingReminders: payloadFiles.length > 0 ? [] : reminders,
             existingTags: existingTags.slice(0, 30),
           });
         } else {
@@ -301,12 +346,20 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       const markedProposed: MarkedCandidate[] =
         rawProposed.length > 0 ? detectDuplicates(rawProposed, expenses) : [];
 
+      const rawReminders: ExtractedReminder[] = chatData?.proposedReminders || [];
+      const markedReminders: MarkedReminderCandidate[] = rawReminders.map((r, idx) => ({
+        ...r,
+        tempId: `remcand_${Date.now()}_${idx}`,
+        selected: true,
+      }));
+
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
         content: chatData?.reply || 'İşleminiz tamamlandı.',
         timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
         proposedExpenses: markedProposed.length > 0 ? markedProposed : undefined,
+        proposedReminders: markedReminders.length > 0 ? markedReminders : undefined,
         analysisHighlight: chatData?.analysisHighlight,
       };
 
@@ -402,6 +455,61 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     );
   };
 
+  const toggleProposedReminder = (msgId: string, tempId: string) => {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId || !m.proposedReminders) return m;
+        return {
+          ...m,
+          proposedReminders: m.proposedReminders.map((r) =>
+            r.tempId === tempId ? { ...r, selected: !r.selected } : r
+          ),
+        };
+      })
+    );
+  };
+
+  const updateProposedReminderAmount = (msgId: string, tempId: string, rawVal: string) => {
+    const parsed = Math.abs(parseTurkishAmount(rawVal));
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId || !m.proposedReminders) return m;
+        return {
+          ...m,
+          proposedReminders: m.proposedReminders.map((r) =>
+            r.tempId === tempId
+              ? { ...r, amount: parsed, amountInTRY: parsed, selected: true }
+              : r
+          ),
+        };
+      })
+    );
+  };
+
+  const handleSaveProposedReminders = async (msg: ChatMessage) => {
+    if (!msg.proposedReminders || !onBatchSaveReminders) return;
+    const selected = msg.proposedReminders.filter((r) => r.selected && r.amount > 0);
+    if (selected.length === 0) return;
+
+    await onBatchSaveReminders(
+      selected.map((r) => ({
+        title: r.title,
+        amount: r.amount,
+        currency: r.currency,
+        amountInTRY: r.amountInTRY,
+        category: r.category,
+        tags: r.tags,
+        dueDate: r.dueDate,
+        recurrence: r.recurrence,
+        notes: r.notes,
+      }))
+    );
+
+    setMessages((prev) =>
+      prev.map((m) => (m.id === msg.id ? { ...m, remindersSavedSuccess: true } : m))
+    );
+  };
+
   return (
     <div
       role="dialog"
@@ -476,6 +584,15 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           >
             ? "#yapikredi veya dışarıda yemeye ne kadar harcadım?"
           </button>
+          <button
+            type="button"
+            onClick={() =>
+              sendMessage("Her ayın 5'inde 18.000 TL kira hatırlat #kira")
+            }
+            className="px-2.5 py-1 text-[11px] bg-[#18181b] border border-[#27272a] rounded-md text-[#a1a1aa] hover:text-[#f59e0b] hover:border-[#f59e0b]/50 cursor-pointer"
+          >
+            📅 "Her ayın 5'inde 18.000 TL kira hatırlat"
+          </button>
         </div>
 
         {/* Mesaj Akışı */}
@@ -494,7 +611,11 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     : 'bg-[#121215] border border-[#27272a] text-[#f4f4f5]'
                 }`}
               >
-                <div>{msg.content}</div>
+                <div>
+                  {msg.id === 'welcome-msg'
+                    ? msg.content
+                    : maskMonetaryText(msg.content, isPrivacyMode)}
+                </div>
 
                 {msg.attachmentNames && msg.attachmentNames.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-black/20 text-[11px] font-mono">
@@ -517,7 +638,9 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                       {formatCurrency(
                         msg.analysisHighlight.totalTRY,
                         displayCurrency,
-                        rates
+                        rates,
+                        false,
+                        isPrivacyMode
                       )}
                     </div>
                   </div>
@@ -569,12 +692,12 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                           <div className="shrink-0 flex flex-col items-end gap-1">
                             {msg.savedSuccess ? (
                               <div className="font-mono tabular-nums font-semibold text-[#f4f4f5]">
-                                {formatCurrency(cand.amountInTRY, displayCurrency, rates)}
+                                {formatCurrency(cand.amountInTRY, displayCurrency, rates, false, isPrivacyMode)}
                               </div>
                             ) : (
                               <div className="flex items-center gap-1">
                                 <input
-                                  type="text"
+                                  type={isPrivacyMode && cand.amount !== 0 ? 'password' : 'text'}
                                   inputMode="decimal"
                                   aria-label={`Tutar (${cand.title})`}
                                   placeholder="Tutar girin"
@@ -615,6 +738,101 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                           ? 'Lütfen Yukarıdaki Kutuya Tutarı Yazın'
                           : `Harcamaları Kaydet (${
                               msg.proposedExpenses.filter((c) => c.selected && c.amount !== 0).length
+                            })`}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* İleri Tarihli Ödeme Hatırlatması Onay Kartı */}
+                {msg.proposedReminders && msg.proposedReminders.length > 0 && (
+                  <div
+                    data-testid="assistant-reminder-confirm-card"
+                    className="mt-3 p-3 rounded-lg bg-[#18181b] border border-[#f59e0b]/40 space-y-2.5"
+                  >
+                    <div className="text-xs font-semibold text-[#f4f4f5] flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <CalendarClock className="w-3.5 h-3.5 text-[#f59e0b]" />
+                        Planlanan Ödeme Hatırlatması
+                      </span>
+                      <span className="font-mono text-[11px] text-[#a1a1aa]">
+                        {msg.proposedReminders.length} plan
+                      </span>
+                    </div>
+
+                    <div className="divide-y divide-[#27272a]/60">
+                      {msg.proposedReminders.map((rem) => (
+                        <div
+                          key={rem.tempId}
+                          className="py-2 flex items-start justify-between gap-2"
+                        >
+                          <label className="flex items-start gap-2 cursor-pointer flex-1 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={rem.selected}
+                              disabled={msg.remindersSavedSuccess}
+                              onChange={() => toggleProposedReminder(msg.id, rem.tempId)}
+                              className="mt-0.5 rounded border-[#27272a] bg-[#09090b] text-[#f59e0b]"
+                            />
+                            <div className="min-w-0">
+                              <div className="font-medium text-[#f4f4f5] break-words">{rem.title}</div>
+                              <div className="text-[11px] text-[#a1a1aa] font-mono tabular-nums">
+                                {rem.dueDate} · {getRecurrenceLabel(rem.recurrence)}
+                              </div>
+                              <div className="text-[11px] text-[#71717a]">
+                                {rem.category} · <span className="font-mono text-[#f59e0b]">{rem.tags.join(' ')}</span>
+                              </div>
+                            </div>
+                          </label>
+                          <div className="shrink-0 flex flex-col items-end gap-1">
+                            {msg.remindersSavedSuccess ? (
+                              <div className="font-mono tabular-nums font-semibold text-[#f4f4f5]">
+                                {formatCurrency(rem.amountInTRY, displayCurrency, rates, false, isPrivacyMode)}
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type={isPrivacyMode && rem.amount > 0 ? 'password' : 'text'}
+                                  inputMode="decimal"
+                                  aria-label={`Hatırlatma Tutarı (${rem.title})`}
+                                  placeholder="Tutar"
+                                  defaultValue={rem.amount > 0 ? String(rem.amount) : ''}
+                                  onChange={(e) =>
+                                    updateProposedReminderAmount(msg.id, rem.tempId, e.target.value)
+                                  }
+                                  className={`w-24 text-right px-2 py-1 rounded bg-[#09090b] border font-mono tabular-nums text-xs font-semibold focus:outline-none ${
+                                    rem.amount <= 0
+                                      ? 'border-[#f59e0b] text-[#f59e0b] placeholder-[#f59e0b]/70'
+                                      : 'border-[#27272a] text-[#f4f4f5] focus:border-[#f59e0b]'
+                                  }`}
+                                />
+                                <span className="text-[11px] font-mono text-[#a1a1aa]">₺</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {msg.remindersSavedSuccess ? (
+                      <div className="w-full py-2 text-center text-xs font-semibold text-[#10b981] bg-[#10b981]/10 rounded-lg flex items-center justify-center gap-1.5">
+                        <Check className="w-4 h-4" />
+                        Takvim Hatırlatmasına Eklendi
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={
+                          msg.proposedReminders.filter((r) => r.selected && r.amount > 0).length === 0
+                        }
+                        onClick={() => handleSaveProposedReminders(msg)}
+                        className="w-full py-2 text-xs font-semibold bg-[#f59e0b] text-[#09090b] rounded-lg hover:bg-[#f59e0b]/90 disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <CalendarClock className="w-3.5 h-3.5" />
+                        {msg.proposedReminders.some((r) => r.selected && r.amount <= 0)
+                          ? 'Lütfen Tutarı Yazın'
+                          : `Takvime Hatırlatma Ekle (${
+                              msg.proposedReminders.filter((r) => r.selected && r.amount > 0).length
                             })`}
                       </button>
                     )}

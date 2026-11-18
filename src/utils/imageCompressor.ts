@@ -25,7 +25,7 @@ export async function prepareFileForGemini(file: File): Promise<PreparedAttachme
     file.type.startsWith('image/') ||
     /\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(file.name || '')
   ) {
-    return compressImageOnCanvas(file, 1024, 0.76);
+    return compressImageOnCanvas(file, 800, 0.68);
   }
 
   throw new Error('Desteklenmeyen dosya formatı. Lütfen görsel (PNG/JPEG/WebP) veya PDF yükleyin.');

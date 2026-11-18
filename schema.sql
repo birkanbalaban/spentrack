@@ -29,3 +29,23 @@ CREATE TABLE IF NOT EXISTS expenses (
 CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(user_id, category);
 CREATE INDEX IF NOT EXISTS idx_users_bot_api_key ON users(bot_api_key);
+
+CREATE TABLE IF NOT EXISTS payment_reminders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'default_user',
+  title TEXT NOT NULL,
+  amount REAL NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'TRY',
+  amount_in_try REAL NOT NULL,
+  category TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  due_date TEXT NOT NULL,
+  recurrence TEXT NOT NULL DEFAULT 'once',
+  status TEXT NOT NULL DEFAULT 'pending',
+  notes TEXT DEFAULT '',
+  paid_at TEXT DEFAULT '',
+  paid_expense_id TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_user_due ON payment_reminders(user_id, due_date ASC);

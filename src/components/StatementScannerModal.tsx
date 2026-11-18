@@ -188,7 +188,7 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
         expenses?: ExtractedExpense[];
       } | null = null;
 
-      const fetchTimeoutMs = 26000;
+      const fetchTimeoutMs = 50000;
       const reqStart = performance.now();
 
       const runServerExtract = async () => {

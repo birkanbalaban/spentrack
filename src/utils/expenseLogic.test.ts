@@ -11,6 +11,10 @@ import {
   parseCSVToExpenses,
   getCategoryColor,
   getTagColor,
+  formatCurrency,
+  maskMonetaryText,
+  calculateWeeklyCategorySummary,
+  calculateMonthEndHabitProjection,
 } from './expenseLogic';
 import { Expense, ExtractedExpense } from '../types';
 
@@ -184,4 +188,153 @@ test('CSV export and import round-trip preserves expense fields', () => {
   assert.equal(parsed[0].amount, 4500);
   assert.deepEqual(parsed[0].tags, ['#yapikredi', '#taksit']);
   assert.equal(parsed[0].notes, '2/6 Taksit');
+});
+
+test('formatCurrency and maskMonetaryText conceal amounts with stars when privacy mode is active', () => {
+  assert.equal(formatCurrency(1450.5, 'TRY', null, false, true), '**** ₺');
+  assert.equal(formatCurrency(-650, 'USD', null, true, true), '**** $');
+  assert.equal(formatCurrency(100, 'EUR', null, false, true), '**** €');
+  assert.equal(formatCurrency(100, 'GBP', null, false, true), '**** £');
+
+  const sampleText = '2026-11 döneminde 4 işlem için toplam 5.867,60 ₺ (%42) ve $120.50 harcadınız.';
+  assert.equal(
+    maskMonetaryText(sampleText, true),
+    '2026-11 döneminde 4 işlem için toplam **** ₺ (%42) ve **** $ harcadınız.'
+  );
+  assert.equal(maskMonetaryText(sampleText, false), sampleText);
+});
+
+test('calculateWeeklyCategorySummary computes top 3 categories, WoW trend, and otherPercentage accurately', () => {
+  const sample: Expense[] = [
+    {
+      id: 'w1',
+      title: 'Migros',
+      amount: 4000,
+      currency: 'TRY',
+      amountInTRY: 4000,
+      category: 'Market',
+      tags: ['#market'],
+      date: '2026-11-16',
+    },
+    {
+      id: 'w2',
+      title: 'Zara',
+      amount: 3000,
+      currency: 'TRY',
+      amountInTRY: 3000,
+      category: 'Alışveriş',
+      tags: ['#giyim'],
+      date: '2026-11-15',
+    },
+    {
+      id: 'w3',
+      title: 'Opet',
+      amount: 2000,
+      currency: 'TRY',
+      amountInTRY: 2000,
+      category: 'Ulaşım',
+      tags: ['#akaryakit'],
+      date: '2026-11-14',
+    },
+    {
+      id: 'w4',
+      title: 'Kahve',
+      amount: 1000,
+      currency: 'TRY',
+      amountInTRY: 1000,
+      category: 'Yeme-İçme',
+      tags: ['#kahve'],
+      date: '2026-11-12',
+    },
+    {
+      id: 'prev1',
+      title: 'Geçen Hafta Market',
+      amount: 8000,
+      currency: 'TRY',
+      amountInTRY: 8000,
+      category: 'Market',
+      tags: ['#market'],
+      date: '2026-11-08',
+    },
+  ];
+
+  const weekly = calculateWeeklyCategorySummary(sample, '2026-11-17');
+  assert.equal(weekly.currentWeekTotalTRY, 10000);
+  assert.equal(weekly.previousWeekTotalTRY, 8000);
+  assert.equal(weekly.changePercent, 25);
+  assert.equal(weekly.trendDirection, 'up');
+  assert.equal(weekly.topCategories.length, 3);
+  assert.equal(weekly.topCategories[0].category, 'Market');
+  assert.equal(weekly.topCategories[0].percentage, 40);
+  assert.equal(weekly.topCategories[0].previousWeekTotalTRY, 8000);
+  assert.equal(weekly.topCategories[0].changePercent, -50);
+  assert.equal(weekly.topCategories[0].trendDirection, 'down');
+  assert.equal(weekly.topCategories[1].category, 'Alışveriş');
+  assert.equal(weekly.topCategories[1].percentage, 30);
+  assert.equal(weekly.topCategories[1].previousWeekTotalTRY, 0);
+  assert.equal(weekly.topCategories[1].changePercent, 100);
+  assert.equal(weekly.topCategories[1].trendDirection, 'up');
+  assert.equal(weekly.topCategories[2].category, 'Ulaşım');
+  assert.equal(weekly.topCategories[2].percentage, 20);
+  assert.equal(weekly.topCategories[2].previousWeekTotalTRY, 0);
+  assert.equal(weekly.topCategories[2].changePercent, 100);
+  assert.equal(weekly.topCategories[2].trendDirection, 'up');
+  assert.equal(weekly.otherTotalTRY, 1000);
+  assert.equal(weekly.otherPercentage, 10);
+});
+
+test('calculateMonthEndHabitProjection computes daily habit velocity, remaining days, and month-end total accurately', () => {
+  const sample: Expense[] = [
+    {
+      id: 'm1',
+      title: 'Migros',
+      amount: 6000,
+      currency: 'TRY',
+      amountInTRY: 6000,
+      category: 'Market',
+      tags: ['#market'],
+      date: '2026-11-05',
+    },
+    {
+      id: 'm2',
+      title: 'Restoran',
+      amount: 3000,
+      currency: 'TRY',
+      amountInTRY: 3000,
+      category: 'Yeme-İçme',
+      tags: ['#yemek'],
+      date: '2026-11-12',
+    },
+  ];
+
+  // 15th of November (30 days total -> 15 elapsed, 15 remaining)
+  const proj = calculateMonthEndHabitProjection(sample, {
+    monthYear: '2026-11',
+    referenceDateISO: '2026-11-15',
+    reminders: [
+      {
+        id: 'rem-1',
+        title: 'İnternet Faturası',
+        amount: 1000,
+        currency: 'TRY',
+        amountInTRY: 1000,
+        category: 'Fatura & Abonelik',
+        tags: ['#fatura'],
+        dueDate: '2026-11-25',
+        recurrence: 'monthly',
+        status: 'pending',
+      },
+    ],
+  });
+
+  assert.equal(proj.totalDaysInMonth, 30);
+  assert.equal(proj.elapsedDays, 15);
+  assert.equal(proj.remainingDays, 15);
+  assert.equal(proj.currentTotalTRY, 9000);
+  assert.equal(proj.dailyAverageTRY, 600);
+  assert.equal(proj.projectedHabitRemainingTRY, 9000);
+  assert.equal(proj.pendingRemindersTRY, 1000);
+  assert.equal(proj.projectedMonthEndTRY, 19000);
+  assert.equal(proj.topProjectedCategory?.category, 'Market');
+  assert.equal(proj.topProjectedCategory?.projectedTotalTRY, 12000);
 });

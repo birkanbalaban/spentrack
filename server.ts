@@ -10,6 +10,8 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   FIXED_CATEGORIES,
   ExtractedExpense,
+  ExtractedReminder,
+  PaymentReminder,
 } from './src/types';
 import {
   buildDraftExpenseFromPrompt,
@@ -18,6 +20,13 @@ import {
   parseInstantAssistantMessage,
   parseTurkishAmount,
 } from './src/utils/expenseLogic';
+import {
+  computeNextDueDate,
+  getRecurrenceLabel,
+  normalizeRecurrence,
+  normalizeReminderStatus,
+  parseInstantReminderMessage,
+} from './src/utils/reminderLogic';
 import {
   SPENTRACK_MCP_TOOLS,
   buildMcpServerInfo,
@@ -192,7 +201,7 @@ KRİTİK KURALLAR:
 {"detectedBank": "Banka", "summaryNote": "Özet", "reply": "Kısa Türkçe açıklama", "expenses": [{"title": "Başlık", "amount": 5867.6, "currency": "TRY", "amountInTRY": 5867.6, "category": "Fatura & Abonelik", "tags": ["#aidat"], "date": "2026-11-10", "notes": ""}], "proposedExpenses": [{"title": "Başlık", "amount": 5867.6, "currency": "TRY", "amountInTRY": 5867.6, "category": "Fatura & Abonelik", "tags": ["#aidat"], "date": "2026-11-10", "notes": ""}]}`;
 
 const CHAT_SYSTEM_INSTRUCTION = `Sen "SpenTrack Asistan" adında, Türkçe konuşan, hızlı, yalın ve net bir kişisel harcama & ekstre asistanısın.
-Kullanıcı sana iki tür istekte bulunabilir:
+Kullanıcı sana üç tür istekte bulunabilir:
 1. HARCAMA EKLEME İSTEĞİ:
    Örn: "Bugün Sağlam Kart ile 220 TL kahve, 1450 TL market harcadım" veya ekte fiş/ekstre görseli/PDF göndermek.
    - Bu durumda metindeki veya dosyadaki tüm harcamaları ayıkla ve "proposedExpenses" dizisine ekle.
@@ -201,11 +210,16 @@ Kullanıcı sana iki tür istekte bulunabilir:
    - İade varsa tutarı eksi (-amount) yap ve #iade etiketi ekle.
    - "reply" alanında kullanıcıya tespit ettiğin harcamaları kısaca özetle ve aşağıdaki onay kartından kaydedebileceğini söyle.
 
-2. SORU & HARCAMA ANALİZİ:
-   Örn: "Bu ay #yapikredi etiketine veya dışarıda yemeye toplam ne kadar harcadım?"
-   - Sana verilen mevcut harcama özetini ve listesini dikkatle hesapla.
-   - Rakamları kuruşuna kadar doğru topla, iadeleri düş ve çok net, okunaklı bir Türkçe yanıt ("reply") üret.
-   - Eğer bir soru/analiz yanıtlıyorsan ve yeni harcama eklenmiyorsa "proposedExpenses" dizisini boş ([]) bırak ve "analysisHighlight" alanını doldur.`;
+2. İLERİ TARİHLİ ÖDEME HATIRLATMA / TAKVİM PLANI EKLEME:
+   Örn: "25 Kasım'da 4500 TL elektrik faturası hatırlat", "Her ayın 5'inde 18000 TL kira planla", "Gelecek ay 2000 TL aidat takvime ekle".
+   - Bu istekler gerçekleşmiş harcama DEĞİLDİR! "proposedExpenses" dizisini boş bırakıp ödeme planlarını "proposedReminders" dizisine ekle:
+     {"title": "...", "amount": 4500, "currency": "TRY", "amountInTRY": 4500, "category": "Fatura & Abonelik", "tags": ["#fatura"], "dueDate": "YYYY-MM-DD", "recurrence": "once|monthly|yearly", "notes": ""}.
+   - Aylık tekrar edenler için recurrence="monthly", yıllık için "yearly", tek seferlik için "once" yaz.
+
+3. SORU, HARCAMA & ÖDEME TAKVİMİ ANALİZİ:
+   Örn: "Bu ay #yapikredi etiketine ne kadar harcadım?" veya "Yaklaşan / geciken ödemelerim neler?".
+   - Sana verilen mevcut harcama özetini VE bekleyen/geciken ödeme hatırlatmalarını dikkatle hesapla.
+   - Rakamları kuruşuna kadar doğru topla, net Türkçe yanıt ("reply") üret ve "analysisHighlight" alanını doldur.`;
 
 function sanitizeGeminiApiKey(raw?: string | null): string | null {
   if (!raw || typeof raw !== 'string') return null;
@@ -219,11 +233,8 @@ function sanitizeGeminiApiKey(raw?: string | null): string | null {
   const aizaMatch = cleaned.match(/AIza[0-9A-Za-z_-]{25,}/);
   if (aizaMatch) {
     cleaned = aizaMatch[0];
-  } else {
-    const aqMatch = cleaned.match(/AQ[0-9A-Za-z_.-]{20,}/);
-    if (aqMatch) {
-      cleaned = aqMatch[0];
-    }
+  } else if (/^AQ[0-9A-Za-z_.-]{15,}/.test(cleaned)) {
+    return null;
   }
 
   if (
@@ -291,10 +302,36 @@ function getCandidateApiKeys(userId: string, customKey?: string): string[] {
   return candidates;
 }
 
-const GEMINI_TEXT_TIMEOUT_MS = 12000;
-const GEMINI_MEDIA_TIMEOUT_MS = 24000;
-const GEMINI_TOTAL_BUDGET_MS = 26000;
+const GEMINI_TEXT_TIMEOUT_MS = 28000;
+const GEMINI_MEDIA_TIMEOUT_MS = 45000;
+const GEMINI_TOTAL_BUDGET_MS = 48000;
 const PRIMARY_VISION_MODEL = 'gemini-4-hydrogen';
+const FAST_LITE_VISION_MODEL = 'gemini-3.1-flash-lite';
+const FAST_FLASH_VISION_MODEL = 'gemini-2.5-flash';
+
+interface ServerHedgedModelSpec {
+  model: string;
+  thinkingConfig: { thinkingLevel?: ThinkingLevel; thinkingBudget?: number };
+  staggerMs: number;
+}
+
+const SERVER_HEDGED_SPECS: ServerHedgedModelSpec[] = [
+  {
+    model: FAST_LITE_VISION_MODEL,
+    thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    staggerMs: 0,
+  },
+  {
+    model: FAST_FLASH_VISION_MODEL,
+    thinkingConfig: { thinkingBudget: 0 },
+    staggerMs: 0,
+  },
+  {
+    model: PRIMARY_VISION_MODEL,
+    thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    staggerMs: 1200,
+  },
+];
 
 function parseGeminiJsonSafe(rawText: string): Record<string, unknown> {
   const cleaned = String(rawText || '')
@@ -342,7 +379,7 @@ function formatGeminiErrorMessage(err: unknown): { status: number; message: stri
     return {
       status: 400,
       message:
-        "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden geçerli ('AIza...' veya 'AQ...' ile başlayan) anahtarınızı kontrol edip eksiksiz kopyaladığınızdan emin olun.",
+        "Girilen Gemini API anahtarı Google tarafından reddedildi (API_KEY_INVALID). Lütfen https://aistudio.google.com/apikey adresinden geçerli ('AIza...' ile başlayan) anahtarınızı kontrol edip eksiksiz kopyaladığınızdan emin olun.",
     };
   }
   if (raw.includes('GEMINI_TIMEOUT') || raw.includes('AbortError')) {
@@ -353,6 +390,97 @@ function formatGeminiErrorMessage(err: unknown): { status: number; message: stri
     };
   }
   return { status: 500, message: raw };
+}
+
+async function runServerHedgedGeneration(
+  ai: GoogleGenAI,
+  params: {
+    parts: Record<string, unknown>[];
+    systemInstruction: string;
+  },
+  parentSignal: AbortSignal
+): Promise<{ text: string; model: string }> {
+  const groupController = new AbortController();
+  const onParentAbort = () => groupController.abort();
+  if (parentSignal.aborted) {
+    groupController.abort();
+  } else {
+    parentSignal.addEventListener('abort', onParentAbort, { once: true });
+  }
+
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  let triggerDelayedStart: (() => void) | null = null;
+  let fastFailures = 0;
+
+  const waitForStaggerOrEarlyFail = (staggerMs: number) =>
+    new Promise<void>((resolve) => {
+      if (staggerMs <= 0 || fastFailures > 0) {
+        resolve();
+        return;
+      }
+      const prevTrigger = triggerDelayedStart;
+      triggerDelayedStart = () => {
+        if (prevTrigger) prevTrigger();
+        resolve();
+      };
+      const t = setTimeout(resolve, staggerMs);
+      timers.push(t);
+    });
+
+  try {
+    const tasks = SERVER_HEDGED_SPECS.map(async (spec) => {
+      if (spec.staggerMs > 0) {
+        await waitForStaggerOrEarlyFail(spec.staggerMs);
+      }
+      if (groupController.signal.aborted) {
+        throw new Error('Aborted');
+      }
+      try {
+        const res = await ai.models.generateContent({
+          model: spec.model,
+          contents: { parts: params.parts },
+          config: {
+            thinkingConfig: spec.thinkingConfig,
+            systemInstruction: params.systemInstruction,
+            responseMimeType: 'application/json',
+            abortSignal: groupController.signal,
+          },
+        });
+        const text = (res.text || '').trim();
+        if (!text || !text.includes('{')) {
+          throw new Error(`Boş veya geçersiz JSON yanıtı (${spec.model})`);
+        }
+        return { text, model: spec.model };
+      } catch (err) {
+        if (spec.staggerMs === 0) {
+          fastFailures++;
+          if (triggerDelayedStart) triggerDelayedStart();
+        }
+        throw err;
+      }
+    });
+
+    return await Promise.any(tasks);
+  } catch (err) {
+    if (err && typeof err === 'object' && 'errors' in err && Array.isArray((err as { errors: unknown[] }).errors)) {
+      const errs = (err as { errors: unknown[] }).errors;
+      const keyErr = errs.find((e) => {
+        const m = e instanceof Error ? e.message : String(e || '');
+        return m.includes('API_KEY_INVALID') || m.includes('API key not valid');
+      });
+      if (keyErr) throw keyErr;
+      const nonAbort = errs.find((e) => {
+        const m = e instanceof Error ? e.message : String(e || '');
+        return !m.includes('Aborted') && !m.includes('AbortError');
+      });
+      throw nonAbort || errs[0] || new Error('Gemini API yanıt vermedi.');
+    }
+    throw err;
+  } finally {
+    groupController.abort();
+    parentSignal.removeEventListener('abort', onParentAbort);
+    for (const t of timers) clearTimeout(t);
+  }
 }
 
 async function generateGeminiContentWithFallback(
@@ -374,7 +502,7 @@ async function generateGeminiContentWithFallback(
 
   for (const apiKey of candidateKeys) {
     const keyPrefix = `${apiKey.slice(0, 4)}...${apiKey.slice(-3)}`;
-    const modeLabel = 'direct';
+    const modeLabel = 'hedged-direct';
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -390,32 +518,30 @@ async function generateGeminiContentWithFallback(
     }
 
     const remainingBudget = GEMINI_TOTAL_BUDGET_MS - elapsedTotal;
-    const effectiveTimeoutMs = Math.max(4000, Math.min(perAttemptTimeoutMs, remainingBudget));
+    const effectiveTimeoutMs = Math.max(6000, Math.min(perAttemptTimeoutMs, remainingBudget));
     const attemptStart = Date.now();
 
     try {
-      const response = await callGeminiWithTimeout(
+      const winner = await callGeminiWithTimeout(
         (signal) =>
-          ai.models.generateContent({
-            model: PRIMARY_VISION_MODEL,
-            contents: { parts: params.parts },
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          runServerHedgedGeneration(
+            ai,
+            {
+              parts: params.parts,
               systemInstruction: params.systemInstruction,
-              responseMimeType: 'application/json',
-              abortSignal: signal,
             },
-          }),
+            signal
+          ),
         effectiveTimeoutMs,
-        `${opLabel}:${modeLabel}:${PRIMARY_VISION_MODEL}`
+        `${opLabel}:${modeLabel}`
       );
 
       const attemptMs = Date.now() - attemptStart;
       const totalMs = Date.now() - overallStart;
-      const text = (response.text || '{}').trim();
+      const text = (winner.text || '{}').trim();
       if (text) {
         console.info(
-          `[SpenTrack Perf] Gemini OK | op=${opLabel} model=${PRIMARY_VISION_MODEL} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms`
+          `[SpenTrack Perf] Gemini OK | op=${opLabel} model=${winner.model} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms`
         );
         return text;
       }
@@ -426,7 +552,7 @@ async function generateGeminiContentWithFallback(
       const msg = err instanceof Error ? err.message : String(err || '');
       const isTimeout = msg.includes('GEMINI_TIMEOUT') || msg.includes('AbortError');
       console.warn(
-        `[SpenTrack Perf] Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=${opLabel} model=${PRIMARY_VISION_MODEL} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms reason=${msg.slice(0, 140)}`
+        `[SpenTrack Perf] Gemini ${isTimeout ? 'TIMEOUT' : 'FAIL'} | op=${opLabel} mode=${modeLabel} key=${keyPrefix} attemptMs=${attemptMs}ms totalMs=${totalMs}ms reason=${msg.slice(0, 140)}`
       );
     }
   }
@@ -1040,6 +1166,248 @@ async function startServer() {
           });
         }
 
+        if (toolName === 'add_payment_reminder') {
+          const title = String(args.title || '').trim();
+          const amount = Math.abs(Number(args.amount));
+          const dueDate = String(args.dueDate || '').slice(0, 10);
+          if (!title || !Number.isFinite(amount) || amount <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: 'Hata: title, pozitif amount ve YYYY-MM-DD formatında dueDate zorunludur.' }],
+                isError: true,
+              },
+            });
+          }
+
+          const currency = (['TRY', 'USD', 'EUR', 'GBP'].includes(String(args.currency || 'TRY').toUpperCase())
+            ? String(args.currency || 'TRY').toUpperCase()
+            : 'TRY') as PaymentReminder['currency'];
+          const amountInTRY = convertToTRY(amount, currency);
+          const category = normalizeCategory(String(args.category || `${title} Fatura`));
+          const tags = normalizeTagList(Array.isArray(args.tags) ? (args.tags as string[]) : ['#planli']);
+          const finalTags = tags.length > 0 ? tags : ['#planli'];
+          const recurrence = normalizeRecurrence(String(args.recurrence || 'once'));
+          const notes = String(args.notes || '').trim();
+          const remId = `rem-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+          db.prepare(
+            `INSERT INTO payment_reminders (id, user_id, title, amount, currency, amount_in_try, category, tags, due_date, recurrence, status, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+          ).run(remId, botUser.id, title, amount, currency, amountInTRY, category, JSON.stringify(finalTags), dueDate, recurrence, notes);
+
+          const text = `📅 Ödeme hatırlatması takvime eklendi:\n• Başlık: ${title}\n• Tutar: ${amount.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${currency}\n• Vade / Hatırlatma Tarihi: ${dueDate}\n• Sıklık: ${getRecurrenceLabel(recurrence)}\n• ID: \`${remId}\``;
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text }],
+              isError: false,
+              data: { id: remId, title, amount, currency, amountInTRY, category, tags: finalTags, dueDate, recurrence, status: 'pending', notes },
+            },
+          });
+        }
+
+        if (toolName === 'list_payment_reminders') {
+          const statusFilter = String(args.status || 'pending').toLowerCase();
+          const monthFilter = args.monthYear && /^\d{4}-\d{2}$/.test(String(args.monthYear)) ? String(args.monthYear) : '';
+          const includeOverdue = args.includeOverdue !== false;
+          const today = new Date().toISOString().slice(0, 10);
+
+          const rawRows = db
+            .prepare('SELECT * FROM payment_reminders WHERE user_id = ? ORDER BY due_date ASC, created_at DESC')
+            .all(botUser.id) as Record<string, unknown>[];
+
+          let rows: PaymentReminder[] = rawRows.map((r) => ({
+            id: String(r.id),
+            userId: String(r.user_id),
+            title: String(r.title),
+            amount: Number(r.amount),
+            currency: String(r.currency || 'TRY') as PaymentReminder['currency'],
+            amountInTRY: Number(r.amount_in_try),
+            category: normalizeCategory(String(r.category || 'Diğer')),
+            tags: JSON.parse(String(r.tags || '[]')),
+            dueDate: String(r.due_date),
+            recurrence: normalizeRecurrence(String(r.recurrence || 'once')),
+            status: normalizeReminderStatus(String(r.status || 'pending')),
+            notes: String(r.notes || ''),
+            paidAt: String(r.paid_at || '') || undefined,
+            paidExpenseId: String(r.paid_expense_id || '') || undefined,
+          }));
+
+          rows = rows.filter((r) => {
+            if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+            if (monthFilter) {
+              const inMonth = r.dueDate.startsWith(monthFilter);
+              const isOverdue = includeOverdue && r.status === 'pending' && r.dueDate < today;
+              return inMonth || isOverdue;
+            }
+            return true;
+          });
+
+          if (rows.length === 0) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: 'Kriterlere uygun ödeme hatırlatması bulunamadı.' }],
+                isError: false,
+                data: [],
+              },
+            });
+          }
+
+          const totalTRY = rows.reduce((s, r) => s + Number(r.amountInTRY || 0), 0);
+          const lines = rows.map(
+            (r, idx) =>
+              `${idx + 1}. **${r.title}** (${r.dueDate}) — ${r.amount.toLocaleString('tr-TR', {
+                minimumFractionDigits: 2,
+              })} ${r.currency} [${r.status === 'paid' ? 'Ödendi' : r.dueDate < today ? 'Gecikmiş' : 'Bekliyor'} / ${getRecurrenceLabel(r.recurrence)}] - ID: \`${r.id}\``
+          );
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [
+                {
+                  type: 'text',
+                  text: `📅 Toplam ${rows.length} hatırlatma (Toplam: ${totalTRY.toLocaleString('tr-TR', {
+                    minimumFractionDigits: 2,
+                  })} ₺):\n\n${lines.join('\n')}`,
+                },
+              ],
+              isError: false,
+              data: rows,
+            },
+          });
+        }
+
+        if (toolName === 'complete_payment_reminder') {
+          const remId = String(args.id || '').trim();
+          if (!remId) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: 'Hata: Ödenecek hatırlatma id değeri zorunludur.' }], isError: true },
+            });
+          }
+          const paidDate =
+            args.paidDate && /^\d{4}-\d{2}-\d{2}$/.test(String(args.paidDate))
+              ? String(args.paidDate)
+              : new Date().toISOString().slice(0, 10);
+
+          const r = db
+            .prepare('SELECT * FROM payment_reminders WHERE id = ? AND user_id = ?')
+            .get(remId, botUser.id) as Record<string, unknown> | undefined;
+
+          if (!r) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              result: { content: [{ type: 'text', text: `Hata: ${remId} ID'li hatırlatma bulunamadı.` }], isError: true },
+            });
+          }
+
+          const targetRem: PaymentReminder = {
+            id: String(r.id),
+            userId: String(r.user_id),
+            title: String(r.title),
+            amount: Number(r.amount),
+            currency: String(r.currency || 'TRY') as PaymentReminder['currency'],
+            amountInTRY: Number(r.amount_in_try),
+            category: normalizeCategory(String(r.category || 'Diğer')),
+            tags: JSON.parse(String(r.tags || '[]')),
+            dueDate: String(r.due_date),
+            recurrence: normalizeRecurrence(String(r.recurrence || 'once')),
+            status: normalizeReminderStatus(String(r.status || 'pending')),
+            notes: String(r.notes || ''),
+          };
+
+          const newExpId = `exp-rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const createdExpense = {
+            id: newExpId,
+            userId: botUser.id,
+            title: targetRem.title,
+            amount: Math.abs(targetRem.amount),
+            currency: targetRem.currency,
+            amountInTRY: Math.abs(targetRem.amountInTRY),
+            category: targetRem.category,
+            tags: targetRem.tags,
+            date: paidDate,
+            notes: targetRem.notes ? `${targetRem.notes} (Takvim ödemesi)` : 'Takvim hatırlatmasından ödendi',
+          };
+
+          let nextReminder: PaymentReminder | null = null;
+          if (targetRem.recurrence !== 'once') {
+            nextReminder = {
+              ...targetRem,
+              id: `rem-next-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              dueDate: computeNextDueDate(targetRem.dueDate, targetRem.recurrence),
+              status: 'pending',
+            };
+          }
+
+          const payTx = db.transaction(() => {
+            db.prepare(
+              `INSERT INTO expenses (id, user_id, title, amount, currency, amount_in_try, category, tags, date, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+              createdExpense.id,
+              botUser.id,
+              createdExpense.title,
+              createdExpense.amount,
+              createdExpense.currency,
+              createdExpense.amountInTRY,
+              createdExpense.category,
+              JSON.stringify(createdExpense.tags),
+              createdExpense.date,
+              createdExpense.notes
+            );
+
+            db.prepare(
+              `UPDATE payment_reminders SET status = 'paid', paid_at = ?, paid_expense_id = ? WHERE id = ? AND user_id = ?`
+            ).run(paidDate, createdExpense.id, remId, botUser.id);
+
+            if (nextReminder) {
+              db.prepare(
+                `INSERT INTO payment_reminders (id, user_id, title, amount, currency, amount_in_try, category, tags, due_date, recurrence, status, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+              ).run(
+                nextReminder.id,
+                botUser.id,
+                nextReminder.title,
+                nextReminder.amount,
+                nextReminder.currency,
+                nextReminder.amountInTRY,
+                nextReminder.category,
+                JSON.stringify(nextReminder.tags),
+                nextReminder.dueDate,
+                nextReminder.recurrence,
+                nextReminder.notes || ''
+              );
+            }
+          });
+          payTx();
+
+          const nextMsg = nextReminder ? `\n• Sonraki Dönem Planı: ${nextReminder.dueDate} (\`${nextReminder.id}\`)` : '';
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [
+                {
+                  type: 'text',
+                  text: `✅ **${targetRem.title}** ödendi olarak işaretlendi ve **Harcama Ekranına** aktarıldı:\n• Tutar: ${createdExpense.amount.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${createdExpense.currency}\n• Harcama ID: \`${createdExpense.id}\`${nextMsg}`,
+                },
+              ],
+              isError: false,
+              data: { createdExpense, nextReminder },
+            },
+          });
+        }
+
         return res.json({
           jsonrpc: '2.0',
           id,
@@ -1250,6 +1618,300 @@ async function startServer() {
     }
   });
 
+  // GET /api/reminders
+  app.get('/api/reminders', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const userEmail = String(req.headers['x-user-email'] || '').trim().toLowerCase();
+      const rows = db
+        .prepare(
+          'SELECT * FROM payment_reminders WHERE user_id = ? OR (? != "" AND LOWER(user_id) = ?) ORDER BY due_date ASC, created_at DESC'
+        )
+        .all(userId, userEmail, userEmail) as Record<string, unknown>[];
+
+      const reminders: PaymentReminder[] = rows.map((r) => ({
+        id: String(r.id),
+        userId: String(r.user_id),
+        title: String(r.title),
+        amount: Number(r.amount),
+        currency: String(r.currency || 'TRY') as PaymentReminder['currency'],
+        amountInTRY: Number(r.amount_in_try),
+        category: normalizeCategory(String(r.category || 'Diğer')),
+        tags: (() => {
+          try {
+            return JSON.parse(String(r.tags || '[]'));
+          } catch {
+            return [];
+          }
+        })(),
+        dueDate: String(r.due_date),
+        recurrence: normalizeRecurrence(String(r.recurrence || 'once')),
+        status: normalizeReminderStatus(String(r.status || 'pending')),
+        notes: String(r.notes || ''),
+        paidAt: String(r.paid_at || '') || undefined,
+        paidExpenseId: String(r.paid_expense_id || '') || undefined,
+        createdAt: String(r.created_at || ''),
+      }));
+
+      res.json({ reminders, storageMode: 'd1' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Hatırlatmalar okunamadı';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // POST /api/reminders
+  app.post('/api/reminders', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const body = req.body || {};
+      const id = String(body.id || `rem-${crypto.randomUUID()}`);
+      const title = String(body.title || '').trim();
+      const amount = Math.abs(Number(body.amount));
+      if (!title || !Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: 'Başlık ve geçerli bir tutar zorunludur.' });
+        return;
+      }
+      const currency = (['TRY', 'USD', 'EUR', 'GBP'].includes(String(body.currency || 'TRY').toUpperCase())
+        ? String(body.currency || 'TRY').toUpperCase()
+        : 'TRY') as PaymentReminder['currency'];
+      const amountInTRY = Math.abs(Number(body.amountInTRY ?? amount));
+      const category = normalizeCategory(String(body.category || 'Fatura & Abonelik'));
+      const tags = normalizeTagList(Array.isArray(body.tags) ? body.tags : []);
+      const finalTags = tags.length > 0 ? tags : ['#planli'];
+      const dueDate = String(body.dueDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      const recurrence = normalizeRecurrence(String(body.recurrence || 'once'));
+      const status = normalizeReminderStatus(String(body.status || 'pending'));
+      const notes = String(body.notes || '').trim();
+
+      db.prepare(
+        `INSERT OR REPLACE INTO payment_reminders (id, user_id, title, amount, currency, amount_in_try, category, tags, due_date, recurrence, status, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, userId, title, amount, currency, amountInTRY, category, JSON.stringify(finalTags), dueDate, recurrence, status, notes);
+
+      res.json({
+        ok: true,
+        id,
+        reminder: { id, userId, title, amount, currency, amountInTRY, category, tags: finalTags, dueDate, recurrence, status, notes },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Hatırlatma kaydedilemedi';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // POST /api/reminders/batch
+  app.post('/api/reminders/batch', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const items = Array.isArray(req.body?.reminders) ? req.body.reminders : [];
+      if (items.length === 0) {
+        res.json({ ok: true, inserted: 0, reminders: [] });
+        return;
+      }
+
+      const stmt = db.prepare(
+        `INSERT OR REPLACE INTO payment_reminders (id, user_id, title, amount, currency, amount_in_try, category, tags, due_date, recurrence, status, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const savedList: PaymentReminder[] = [];
+      const batchTx = db.transaction((rows: Record<string, unknown>[]) => {
+        for (const item of rows) {
+          const id = String(item.id || `rem-${crypto.randomUUID()}`);
+          const title = String(item.title || 'Planlanan Ödeme').trim();
+          const amount = Math.abs(Number(item.amount || 0));
+          if (!amount) continue;
+          const currency = (['TRY', 'USD', 'EUR', 'GBP'].includes(String(item.currency || 'TRY').toUpperCase())
+            ? String(item.currency || 'TRY').toUpperCase()
+            : 'TRY') as PaymentReminder['currency'];
+          const amountInTRY = Math.abs(Number(item.amountInTRY ?? amount));
+          const category = normalizeCategory(String(item.category || 'Fatura & Abonelik'));
+          const tags = normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : []);
+          const finalTags = tags.length > 0 ? tags : ['#planli'];
+          const dueDate = String(item.dueDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+          const recurrence = normalizeRecurrence(String(item.recurrence || 'once'));
+          const status = normalizeReminderStatus(String(item.status || 'pending'));
+          const notes = String(item.notes || '').trim();
+
+          stmt.run(id, userId, title, amount, currency, amountInTRY, category, JSON.stringify(finalTags), dueDate, recurrence, status, notes);
+          savedList.push({ id, userId, title, amount, currency, amountInTRY, category, tags: finalTags, dueDate, recurrence, status, notes });
+        }
+      });
+      batchTx(items);
+      res.json({ ok: true, inserted: savedList.length, reminders: savedList });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Toplu hatırlatma kaydı başarısız';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // POST /api/reminders/:id/pay
+  app.post('/api/reminders/:id/pay', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { id } = req.params;
+      const paidDate =
+        req.body?.paidDate && /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.paidDate))
+          ? String(req.body.paidDate)
+          : new Date().toISOString().slice(0, 10);
+
+      const r = db
+        .prepare('SELECT * FROM payment_reminders WHERE id = ? AND user_id = ?')
+        .get(id, userId) as Record<string, unknown> | undefined;
+
+      if (!r) {
+        res.status(404).json({ error: 'Hatırlatma bulunamadı.' });
+        return;
+      }
+
+      const targetRem: PaymentReminder = {
+        id: String(r.id),
+        userId: String(r.user_id),
+        title: String(r.title),
+        amount: Number(r.amount),
+        currency: String(r.currency || 'TRY') as PaymentReminder['currency'],
+        amountInTRY: Number(r.amount_in_try),
+        category: normalizeCategory(String(r.category || 'Diğer')),
+        tags: JSON.parse(String(r.tags || '[]')),
+        dueDate: String(r.due_date),
+        recurrence: normalizeRecurrence(String(r.recurrence || 'once')),
+        status: normalizeReminderStatus(String(r.status || 'pending')),
+        notes: String(r.notes || ''),
+      };
+
+      const newExpId = `exp-rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const createdExpense = {
+        id: newExpId,
+        userId,
+        title: targetRem.title,
+        amount: Math.abs(targetRem.amount),
+        currency: targetRem.currency,
+        amountInTRY: Math.abs(targetRem.amountInTRY),
+        category: targetRem.category,
+        tags: targetRem.tags,
+        date: paidDate,
+        notes: targetRem.notes ? `${targetRem.notes} (Takvim ödemesi)` : 'Takvim hatırlatmasından ödendi',
+      };
+
+      const paidReminder: PaymentReminder = {
+        ...targetRem,
+        status: 'paid',
+        paidAt: paidDate,
+        paidExpenseId: newExpId,
+      };
+
+      let nextReminder: PaymentReminder | null = null;
+      if (targetRem.recurrence !== 'once') {
+        nextReminder = {
+          ...targetRem,
+          id: `rem-${crypto.randomUUID()}`,
+          dueDate: computeNextDueDate(targetRem.dueDate, targetRem.recurrence),
+          status: 'pending',
+        };
+      }
+
+      const tx = db.transaction(() => {
+        db.prepare(
+          `INSERT INTO expenses (id, user_id, title, amount, currency, amount_in_try, category, tags, date, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          createdExpense.id,
+          userId,
+          createdExpense.title,
+          createdExpense.amount,
+          createdExpense.currency,
+          createdExpense.amountInTRY,
+          createdExpense.category,
+          JSON.stringify(createdExpense.tags),
+          createdExpense.date,
+          createdExpense.notes
+        );
+
+        db.prepare(
+          `UPDATE payment_reminders SET status = 'paid', paid_at = ?, paid_expense_id = ? WHERE id = ? AND user_id = ?`
+        ).run(paidDate, newExpId, id, userId);
+
+        if (nextReminder) {
+          db.prepare(
+            `INSERT INTO payment_reminders (id, user_id, title, amount, currency, amount_in_try, category, tags, due_date, recurrence, status, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+          ).run(
+            nextReminder.id,
+            userId,
+            nextReminder.title,
+            nextReminder.amount,
+            nextReminder.currency,
+            nextReminder.amountInTRY,
+            nextReminder.category,
+            JSON.stringify(nextReminder.tags),
+            nextReminder.dueDate,
+            nextReminder.recurrence,
+            nextReminder.notes || ''
+          );
+        }
+      });
+      tx();
+
+      res.json({ ok: true, paidReminder, createdExpense, nextReminder });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Ödeme işlemi tamamlanamadı';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // PUT /api/reminders/:id
+  app.put('/api/reminders/:id', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { id } = req.params;
+      const body = req.body || {};
+      const title = String(body.title || '').trim();
+      const amount = Math.abs(Number(body.amount));
+      if (!title || !Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: 'Başlık ve geçerli bir tutar zorunludur.' });
+        return;
+      }
+      const currency = (['TRY', 'USD', 'EUR', 'GBP'].includes(String(body.currency || 'TRY').toUpperCase())
+        ? String(body.currency || 'TRY').toUpperCase()
+        : 'TRY') as PaymentReminder['currency'];
+      const amountInTRY = Math.abs(Number(body.amountInTRY ?? amount));
+      const category = normalizeCategory(String(body.category || 'Fatura & Abonelik'));
+      const tags = normalizeTagList(Array.isArray(body.tags) ? body.tags : []);
+      const finalTags = tags.length > 0 ? tags : ['#planli'];
+      const dueDate = String(body.dueDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      const recurrence = normalizeRecurrence(String(body.recurrence || 'once'));
+      const status = normalizeReminderStatus(String(body.status || 'pending'));
+      const notes = String(body.notes || '').trim();
+
+      db.prepare(
+        `UPDATE payment_reminders
+         SET title = ?, amount = ?, currency = ?, amount_in_try = ?, category = ?, tags = ?, due_date = ?, recurrence = ?, status = ?, notes = ?
+         WHERE id = ? AND user_id = ?`
+      ).run(title, amount, currency, amountInTRY, category, JSON.stringify(finalTags), dueDate, recurrence, status, notes, id, userId);
+
+      res.json({
+        ok: true,
+        reminder: { id, userId, title, amount, currency, amountInTRY, category, tags: finalTags, dueDate, recurrence, status, notes },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Hatırlatma güncellenemedi';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // DELETE /api/reminders/:id
+  app.delete('/api/reminders/:id', (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { id } = req.params;
+      db.prepare('DELETE FROM payment_reminders WHERE id = ? AND user_id = ?').run(id, userId);
+      res.json({ ok: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Hatırlatma silinemedi';
+      res.status(500).json({ error: msg });
+    }
+  });
+
   // POST /api/ai/extract (Fiş, Ekran Görüntüsü ve PDF Kredi Kartı Ekstresi Çıkarımı)
   app.post('/api/ai/extract', async (req, res) => {
     const routeStart = Date.now();
@@ -1379,7 +2041,7 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
     }
   });
 
-  // POST /api/ai/chat (Sohbet İle Harcama Ekleme & Analiz Asistanı)
+  // POST /api/ai/chat (Sohbet İle Harcama Ekleme, Hatırlatma & Analiz Asistanı)
   app.post('/api/ai/chat', async (req, res) => {
     const routeStart = Date.now();
     const today = new Date().toISOString().slice(0, 10);
@@ -1387,11 +2049,29 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
       message = '',
       files = [],
       existingExpenses = [],
+      existingReminders = [],
       existingTags = [],
     } = req.body || {};
 
     try {
       if ((!files || files.length === 0) && String(message || '').trim()) {
+        const instantReminder = parseInstantReminderMessage(message, existingReminders, today);
+        if (instantReminder.handled) {
+          const durationMs = Date.now() - routeStart;
+          console.info(
+            `[SpenTrack Perf] POST /api/ai/chat OK (instant-reminder-nlp) | reminders=${instantReminder.proposedReminders.length} durationMs=${durationMs}ms`
+          );
+          res.setHeader('X-Response-Time-Ms', String(durationMs));
+          res.setHeader('Server-Timing', `instant_reminder_nlp;dur=${durationMs}`);
+          res.json({
+            reply: instantReminder.reply,
+            proposedExpenses: [],
+            proposedReminders: instantReminder.proposedReminders,
+            analysisHighlight: instantReminder.analysisHighlight,
+          });
+          return;
+        }
+
         const instant = parseInstantAssistantMessage(message, existingExpenses, today);
         if (instant.handled) {
           const durationMs = Date.now() - routeStart;
@@ -1403,6 +2083,7 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
           res.json({
             reply: instant.reply,
             proposedExpenses: instant.proposedExpenses,
+            proposedReminders: [],
             analysisHighlight: instant.analysisHighlight,
           });
           return;
@@ -1418,7 +2099,7 @@ ${textPrompt || 'Yüklenen fiş, ekran görüntüsü veya PDF kredi kartı ekstr
         const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
         const durationMs = Date.now() - routeStart;
         res.setHeader('X-Response-Time-Ms', String(durationMs));
-        res.json(fallback);
+        res.json({ ...fallback, proposedReminders: [] });
         return;
       }
 
@@ -1457,12 +2138,22 @@ Kullanıcı mesajı / notu: "${message || 'Görseldeki harcamaları çıkar.'}"
           tags: e.tags,
           notes: e.notes,
         }));
+        const compactReminders = (existingReminders || []).slice(0, 60).map((r: PaymentReminder) => ({
+          title: r.title,
+          amountInTRY: r.amountInTRY,
+          dueDate: r.dueDate,
+          status: r.status,
+          recurrence: r.recurrence,
+          category: r.category,
+        }));
 
         parts.push({
           text: `Bugünün tarihi: ${today}
 Kullanıcının mevcut #etiket havuzu: ${(existingTags || []).join(', ')}
 Kullanıcının mevcut harcama kayıtları (JSON):
 ${JSON.stringify(compactLedger)}
+Kullanıcının mevcut ödeme hatırlatmaları (JSON):
+${JSON.stringify(compactReminders)}
 
 Kullanıcı mesajı: "${message}"`,
         });
@@ -1478,43 +2169,6 @@ Kullanıcı mesajı: "${message}"`,
               : `${CHAT_SYSTEM_INSTRUCTION}\n\n${EXTRACTION_SYSTEM_INSTRUCTION}`,
           timeoutMs: files && files.length > 0 ? GEMINI_MEDIA_TIMEOUT_MS : GEMINI_TEXT_TIMEOUT_MS,
           operationLabel: files && files.length > 0 ? 'assistant-media-chat' : 'assistant-text-chat',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: {
-                type: Type.STRING,
-                description: 'Kullanıcıya gösterilecek Türkçe yanıt veya analiz sonucu',
-              },
-              proposedExpenses: {
-                type: Type.ARRAY,
-                description: 'Kullanıcı harcama eklemek istediyse veya dosya yüklediyse çıkarılan harcamalar listesi',
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    currency: { type: Type.STRING },
-                    amountInTRY: { type: Type.NUMBER },
-                    category: { type: Type.STRING, enum: [...FIXED_CATEGORIES] },
-                    tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    date: { type: Type.STRING },
-                    notes: { type: Type.STRING },
-                  },
-                  required: ['title', 'amount', 'currency', 'amountInTRY', 'category', 'tags', 'date'],
-                },
-              },
-              analysisHighlight: {
-                type: Type.OBJECT,
-                description: 'Eğer kullanıcı harcama analizi sorduysa hesaplanan özet metrik',
-                properties: {
-                  label: { type: Type.STRING },
-                  totalTRY: { type: Type.NUMBER },
-                  count: { type: Type.NUMBER },
-                },
-              },
-            },
-            required: ['reply', 'proposedExpenses'],
-          },
         });
       } catch (lastError) {
         const durationMs = Date.now() - routeStart;
@@ -1524,7 +2178,7 @@ Kullanıcı mesajı: "${message}"`,
             `[SpenTrack Perf] POST /api/ai/chat Gemini failed after ${durationMs}ms, using local NLP fallback`
           );
           const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
-          res.json(fallback);
+          res.json({ ...fallback, proposedReminders: [] });
           return;
         }
         const formatted = formatGeminiErrorMessage(lastError);
@@ -1573,15 +2227,45 @@ Kullanıcı mesajı: "${message}"`,
         })
         .filter((item) => item.amount !== 0);
 
+      const rawReminders: Record<string, unknown>[] = Array.isArray(parsed.proposedReminders)
+        ? parsed.proposedReminders
+        : [];
+      const normalizedReminders: ExtractedReminder[] = rawReminders
+        .map((item: Record<string, unknown>) => {
+          const title = String(item.title || 'Planlanan Ödeme').trim();
+          const amt = Math.abs(parseTurkishAmount((item.amount ?? 0) as number | string));
+          const amtTRY = Math.abs(parseTurkishAmount((item.amountInTRY ?? amt) as number | string));
+          const curr = (['TRY', 'USD', 'EUR', 'GBP'].includes(String(item.currency || 'TRY').toUpperCase())
+            ? String(item.currency || 'TRY').toUpperCase()
+            : 'TRY') as ExtractedReminder['currency'];
+          const tags = normalizeTagList(Array.isArray(item.tags) ? (item.tags as string[]) : ['#planli']);
+          return {
+            title,
+            amount: amt,
+            currency: curr,
+            amountInTRY: amtTRY || amt,
+            category: normalizeCategory(String(item.category || `${title} Fatura`)),
+            tags: tags.length > 0 ? tags : ['#planli'],
+            dueDate:
+              typeof item.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate)
+                ? item.dueDate
+                : today,
+            recurrence: normalizeRecurrence(String(item.recurrence || 'once')),
+            notes: String(item.notes || '').trim(),
+          };
+        })
+        .filter((r) => r.title.length > 0);
+
       const durationMs = Date.now() - routeStart;
       console.info(
-        `[SpenTrack Perf] POST /api/ai/chat OK (gemini) | files=${files.length} items=${normalizedExpenses.length} durationMs=${durationMs}ms`
+        `[SpenTrack Perf] POST /api/ai/chat OK (gemini) | files=${files.length} items=${normalizedExpenses.length} reminders=${normalizedReminders.length} durationMs=${durationMs}ms`
       );
       res.setHeader('X-Response-Time-Ms', String(durationMs));
       res.setHeader('Server-Timing', `chat;dur=${durationMs}`);
       res.json({
         reply: parsed.reply || 'İşlem tamamlandı.',
         proposedExpenses: normalizedExpenses,
+        proposedReminders: normalizedReminders,
         analysisHighlight: parsed.analysisHighlight,
       });
     } catch (err) {
@@ -1590,7 +2274,7 @@ Kullanıcı mesajı: "${message}"`,
       // Fallback gracefully for text messages if API call fails in test sandbox
       if (!files || files.length === 0) {
         const fallback = fallbackNaturalLanguageAssist(message, existingExpenses, today);
-        res.json(fallback);
+        res.json({ ...fallback, proposedReminders: [] });
         return;
       }
       const formatted = formatGeminiErrorMessage(err);

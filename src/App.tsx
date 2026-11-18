@@ -11,6 +11,7 @@ import {
   RotateCcw,
   User,
   Eye,
+  EyeOff,
   LogOut,
   KeyRound,
   Bot,
@@ -22,7 +23,9 @@ import {
   ExpenseCategory,
   ExpenseFilters,
   ExtractedExpense,
+  ExtractedReminder,
   FIXED_CATEGORIES,
+  PaymentReminder,
   UserProfile,
 } from './types';
 import {
@@ -32,11 +35,21 @@ import {
   groupExpensesByDate,
   normalizeTag,
 } from './utils/expenseLogic';
+import {
+  DismissedAlertRecord,
+  addDaysISO,
+  computeNextDueDate,
+  getDueAlertSummary,
+  shiftMonthYear,
+  shouldShowDueAlert,
+} from './utils/reminderLogic';
 import { MetricsOverview } from './components/MetricsOverview';
+import { UpcomingPaymentsBanner } from './components/UpcomingPaymentsBanner';
 import { ExpenseListView } from './components/ExpenseListView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { CalendarView } from './components/CalendarView';
 import { ManualExpenseModal } from './components/ManualExpenseModal';
+import { PaymentReminderModal } from './components/PaymentReminderModal';
 import { StatementScannerModal } from './components/StatementScannerModal';
 import { AssistantDrawer } from './components/AssistantDrawer';
 import { DataSyncModal } from './components/DataSyncModal';
@@ -46,6 +59,9 @@ import { AccountApiKeyBox } from './components/AccountApiKeyBox';
 import { triggerDirectGoogleLogin } from './lib/googleAuth';
 
 const LOCAL_STORAGE_EXPENSES_KEY = 'spentrack_guest_expenses_v1';
+const LOCAL_STORAGE_REMINDERS_KEY = 'spentrack_guest_reminders_v1';
+const LOCAL_STORAGE_PRIVACY_MODE_KEY = 'spentrack_privacy_mode_v1';
+const LOCAL_STORAGE_ALERT_DISMISS_KEY = 'spentrack_alert_dismissed_v1';
 const LOCAL_STORAGE_AUTH_USER_KEY = 'spentrack_auth_user_v2';
 const LOCAL_STORAGE_AUTH_TOKEN_KEY = 'spentrack_auth_token_v2';
 const LEGACY_LOCAL_STORAGE_GEMINI_KEY = 'spentrack_custom_gemini_key_v1';
@@ -166,6 +182,52 @@ function buildDemoExpenses(ym: string): Expense[] {
   ];
 }
 
+function buildDemoReminders(ym: string): PaymentReminder[] {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const nextMonthYM = shiftMonthYear(ym, 1);
+  return [
+    {
+      id: 'demo-rem-1',
+      title: 'Enerjisa Elektrik Faturası',
+      amount: 640.0,
+      currency: 'TRY',
+      amountInTRY: 640.0,
+      category: 'Fatura & Abonelik',
+      tags: ['#fatura', '#otomatik'],
+      dueDate: addDaysISO(todayISO, 4),
+      recurrence: 'monthly',
+      status: 'pending',
+      notes: 'Son ödeme tarihi yaklaşan fatura',
+    },
+    {
+      id: 'demo-rem-2',
+      title: 'Site Yönetimi Aidatı',
+      amount: 5867.6,
+      currency: 'TRY',
+      amountInTRY: 5867.6,
+      category: 'Fatura & Abonelik',
+      tags: ['#aidat', '#enpara'],
+      dueDate: `${nextMonthYM}-05`,
+      recurrence: 'monthly',
+      status: 'pending',
+      notes: 'Her ayın 5inde düzenli ödenir',
+    },
+    {
+      id: 'demo-rem-3',
+      title: 'Yapı Kredi World Ekstre',
+      amount: 8450.0,
+      currency: 'TRY',
+      amountInTRY: 8450.0,
+      category: 'Diğer',
+      tags: ['#yapikredi', '#kredikarti'],
+      dueDate: addDaysISO(todayISO, -2),
+      recurrence: 'monthly',
+      status: 'pending',
+      notes: 'Dönem borcu ödemesi',
+    },
+  ];
+}
+
 export type ActiveViewMode = 'list' | 'analytics' | 'calendar';
 
 export default function App() {
@@ -202,8 +264,43 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [reminders, setReminders] = useState<PaymentReminder[]>([]);
   const [loading, setLoading] = useState(false);
   const [displayCurrency, setDisplayCurrency] = useState<CurrencyCode>('TRY');
+  const [isPrivacyMode, setIsPrivacyMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(LOCAL_STORAGE_PRIVACY_MODE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const togglePrivacyMode = useCallback(() => {
+    setIsPrivacyMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(LOCAL_STORAGE_PRIVACY_MODE_KEY, String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+  const [dismissedAlert, setDismissedAlert] = useState<DismissedAlertRecord | null>(() => {
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_ALERT_DISMISS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.date === 'string' && Array.isArray(parsed.ids)) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  });
+
   const [rates, setRates] = useState<CurrencyRates>(FALLBACK_RATES);
   const [activeView, setActiveView] = useState<ActiveViewMode>('list');
 
@@ -217,6 +314,9 @@ export default function App() {
   // Modals & Drawers
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
+  const [isReminderModalOpen, setIsReminderModalOpen] = useState(false);
+  const [editingReminder, setEditingReminder] = useState<PaymentReminder | null>(null);
+  const [prefilledReminderDate, setPrefilledReminderDate] = useState<string | null>(null);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
@@ -344,6 +444,70 @@ export default function App() {
     [buildAuthHeaders]
   );
 
+  // İleriye Dönük Ödeme Hatırlatmalarını Yükle
+  const fetchReminders = useCallback(
+    async (activeUserId: string, token: string) => {
+      const userCacheKey = `${LOCAL_STORAGE_REMINDERS_KEY}_${activeUserId}`;
+      try {
+        const res = await fetch('/api/reminders', {
+          headers: buildAuthHeaders(activeUserId, token),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const serverList: PaymentReminder[] = data.reminders || [];
+
+          let localCached: PaymentReminder[] = [];
+          try {
+            const rawLocal = localStorage.getItem(userCacheKey);
+            if (rawLocal) {
+              const parsed = JSON.parse(rawLocal);
+              if (Array.isArray(parsed)) {
+                localCached = parsed.filter((r) => r && r.id && !String(r.id).startsWith('demo-'));
+              }
+            }
+          } catch {
+            // ignore
+          }
+
+          const serverIds = new Set(serverList.map((r) => r.id));
+          const unsyncedLocal = localCached.filter((r) => !serverIds.has(r.id));
+
+          if (unsyncedLocal.length > 0) {
+            fetch('/api/reminders/batch', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...buildAuthHeaders(activeUserId, token),
+              },
+              body: JSON.stringify({ reminders: unsyncedLocal }),
+            }).catch(() => {});
+          }
+
+          const mergedList = [...serverList, ...unsyncedLocal].sort((a, b) =>
+            String(a.dueDate || '').localeCompare(String(b.dueDate || ''))
+          );
+
+          setReminders(mergedList);
+          try {
+            localStorage.setItem(userCacheKey, JSON.stringify(mergedList));
+          } catch {
+            // ignore
+          }
+        }
+      } catch {
+        try {
+          const cached = localStorage.getItem(userCacheKey);
+          if (cached) {
+            setReminders(JSON.parse(cached));
+          }
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [buildAuthHeaders]
+  );
+
   // Giriş yapılan kullanıcının hesabına tanımlı Gemini API anahtarını sunucudan çek
   const fetchAccountApiKey = useCallback(
     async (activeUserId: string, token: string) => {
@@ -444,9 +608,10 @@ export default function App() {
   useEffect(() => {
     if (authUser && !isDemoMode) {
       fetchExpenses(authUser.id, authToken);
+      fetchReminders(authUser.id, authToken);
       fetchAccountApiKey(authUser.id, authToken);
     }
-  }, [authUser, authToken, isDemoMode, fetchExpenses, fetchAccountApiKey]);
+  }, [authUser, authToken, isDemoMode, fetchExpenses, fetchReminders, fetchAccountApiKey]);
 
   // Global Ctrl+V ile ekrana fiş / ekran görüntüsü yapıştırma desteği
   useEffect(() => {
@@ -498,6 +663,7 @@ export default function App() {
 
           await Promise.all([
             fetchExpenses(profile.id, token),
+            fetchReminders(profile.id, token),
             fetchAccountApiKey(profile.id, token),
           ]);
           resolve();
@@ -519,6 +685,7 @@ export default function App() {
     setIsDemoMode(false);
     setIsSyncModalOpen(false);
     setExpenses([]);
+    setReminders([]);
     try {
       localStorage.removeItem(LOCAL_STORAGE_AUTH_USER_KEY);
       localStorage.removeItem(LOCAL_STORAGE_AUTH_TOKEN_KEY);
@@ -532,6 +699,7 @@ export default function App() {
   const handleStartDemoMode = () => {
     setAuthError(null);
     setExpenses(buildDemoExpenses(currentMonthYear));
+    setReminders(buildDemoReminders(currentMonthYear));
     setIsDemoMode(true);
     setActiveView('list');
   };
@@ -540,6 +708,7 @@ export default function App() {
   const handleExitDemoMode = () => {
     setIsDemoMode(false);
     setExpenses([]);
+    setReminders([]);
   };
 
   // Tekil Harcama Kaydet / Güncelle
@@ -665,6 +834,225 @@ export default function App() {
     return expenses.length;
   };
 
+  // Tekil Hatırlatma Kaydet / Güncelle
+  const handleSaveReminder = async (
+    payload: Omit<PaymentReminder, 'id' | 'status'> & {
+      id?: string;
+      status?: PaymentReminder['status'];
+    }
+  ) => {
+    const id = payload.id || `rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newRem: PaymentReminder = {
+      ...payload,
+      id,
+      status: payload.status || 'pending',
+    };
+
+    if (isDemoMode || !authUser) {
+      setReminders((prev) => {
+        if (payload.id) {
+          return prev.map((r) => (r.id === payload.id ? { ...r, ...newRem } : r));
+        }
+        return [...prev, newRem].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+      });
+      return;
+    }
+
+    const userCacheKey = `${LOCAL_STORAGE_REMINDERS_KEY}_${authUser.id}`;
+    setReminders((prev) => {
+      const updated = (
+        payload.id
+          ? prev.map((r) => (r.id === payload.id ? { ...r, ...newRem } : r))
+          : [...prev, newRem]
+      ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+      try {
+        localStorage.setItem(userCacheKey, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+
+    const isEdit = Boolean(payload.id);
+    const url = isEdit ? `/api/reminders/${payload.id}` : '/api/reminders';
+    const method = isEdit ? 'PUT' : 'POST';
+
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(authUser.id, authToken),
+      },
+      body: JSON.stringify(newRem),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Hatırlatma kaydedilemedi.');
+    }
+
+    await fetchReminders(authUser.id, authToken);
+  };
+
+  // Toplu Hatırlatma Kaydet (Asistan önerisinden)
+  const handleBatchSaveReminders = async (items: ExtractedReminder[]) => {
+    const created: PaymentReminder[] = items.map((item, idx) => ({
+      ...item,
+      id: `rem-ai-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
+      status: 'pending',
+    }));
+
+    if (isDemoMode || !authUser) {
+      setReminders((prev) =>
+        [...prev, ...created].sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+      );
+      return;
+    }
+
+    const userCacheKey = `${LOCAL_STORAGE_REMINDERS_KEY}_${authUser.id}`;
+    setReminders((prev) => {
+      const updated = [...prev, ...created].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+      try {
+        localStorage.setItem(userCacheKey, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+
+    const res = await fetch('/api/reminders/batch', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(authUser.id, authToken),
+      },
+      body: JSON.stringify({ reminders: created }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Toplu hatırlatma kaydı başarısız.');
+    }
+
+    await fetchReminders(authUser.id, authToken);
+  };
+
+  // Hatırlatma Sil
+  const handleDeleteReminder = async (id: string) => {
+    if (!isDemoMode && authUser) {
+      await fetch(`/api/reminders/${id}`, {
+        method: 'DELETE',
+        headers: buildAuthHeaders(authUser.id, authToken),
+      });
+    }
+    setReminders((prev) => {
+      const updated = prev.filter((r) => r.id !== id);
+      if (authUser) {
+        const userCacheKey = `${LOCAL_STORAGE_REMINDERS_KEY}_${authUser.id}`;
+        try {
+          localStorage.setItem(userCacheKey, JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+      }
+      return updated;
+    });
+  };
+
+  // Hatırlatmayı Ödendi İşaretle -> Gerçek Harcama Oluştur + Tekrarlıysa Sonraki Döngüyü Aç
+  const handlePayReminder = async (reminder: PaymentReminder) => {
+    const todayISO = new Date().toISOString().slice(0, 10);
+
+    if (isDemoMode || !authUser) {
+      const newExpId = `exp-rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const createdExpense: Expense = {
+        id: newExpId,
+        title: reminder.title,
+        amount: Math.abs(reminder.amount),
+        currency: reminder.currency,
+        amountInTRY: Math.abs(reminder.amountInTRY),
+        category: reminder.category,
+        tags: reminder.tags,
+        date: todayISO,
+        notes: reminder.notes
+          ? `${reminder.notes} (Takvim ödemesi)`
+          : 'Takvim hatırlatmasından ödendi',
+      };
+      setExpenses((prev) => [createdExpense, ...prev]);
+
+      const nextRem: PaymentReminder | null =
+        reminder.recurrence !== 'once'
+          ? {
+              ...reminder,
+              id: `demo-rem-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+              dueDate: computeNextDueDate(reminder.dueDate, reminder.recurrence),
+              status: 'pending',
+              paidAt: undefined,
+              paidExpenseId: undefined,
+            }
+          : null;
+
+      setReminders((prev) => {
+        const mapped = prev.map((r) =>
+          r.id === reminder.id
+            ? { ...r, status: 'paid' as const, paidAt: todayISO, paidExpenseId: newExpId }
+            : r
+        );
+        return nextRem ? [...mapped, nextRem] : mapped;
+      });
+      return;
+    }
+
+    const res = await fetch(`/api/reminders/${reminder.id}/pay`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(authUser.id, authToken),
+      },
+      body: JSON.stringify({ paidDate: todayISO }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Ödeme işlenemedi.');
+    }
+
+    await Promise.all([
+      fetchExpenses(authUser.id, authToken),
+      fetchReminders(authUser.id, authToken),
+    ]);
+  };
+
+  const pendingReminderCount = useMemo(
+    () => reminders.filter((r) => r.status === 'pending').length,
+    [reminders]
+  );
+
+  const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  const dueAlertSummary = useMemo(
+    () => getDueAlertSummary(reminders, todayISO),
+    [reminders, todayISO]
+  );
+
+  const showDueAlertBanner = useMemo(
+    () => shouldShowDueAlert(dueAlertSummary, dismissedAlert, todayISO),
+    [dueAlertSummary, dismissedAlert, todayISO]
+  );
+
+  const handleDismissDueAlert = useCallback(() => {
+    const record: DismissedAlertRecord = {
+      date: todayISO,
+      ids: dueAlertSummary.items.map((item) => item.id),
+    };
+    setDismissedAlert(record);
+    try {
+      localStorage.setItem(LOCAL_STORAGE_ALERT_DISMISS_KEY, JSON.stringify(record));
+    } catch {
+      // ignore
+    }
+  }, [todayISO, dueAlertSummary.items]);
+
   // Mevcut tüm #etiket havuzu
   const allExistingTags = useMemo(() => {
     const map = new Map<string, number>();
@@ -676,10 +1064,18 @@ export default function App() {
         }
       }
     }
+    for (const rem of reminders) {
+      for (const t of rem.tags) {
+        const norm = normalizeTag(t);
+        if (norm) {
+          map.set(norm, (map.get(norm) || 0) + 1);
+        }
+      }
+    }
     return Array.from(map.entries())
       .sort((a, b) => b[1] - a[1])
       .map(([tag]) => tag);
-  }, [expenses]);
+  }, [expenses, reminders]);
 
   // Mevcut Ay/Yıl seçenekleri
   const availableMonths = useMemo(() => {
@@ -883,13 +1279,18 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveView('calendar')}
-            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 ${
               activeView === 'calendar'
                 ? 'bg-[#1c1c21] text-[#f4f4f5] font-semibold border border-[#2c2c34]'
                 : 'hover:text-[#f4f4f5]'
             }`}
           >
-            Aylık Takvim
+            <span>Aylık Takvim</span>
+            {pendingReminderCount > 0 && (
+              <span className="font-mono tabular-nums text-[11px] font-semibold text-[#f59e0b]">
+                {pendingReminderCount}
+              </span>
+            )}
           </button>
           <button
             type="button"
@@ -995,6 +1396,27 @@ export default function App() {
               ))}
             </div>
 
+            {/* Gizlilik Modu: Tek İkon Buton (Tutarları Gizle / Göster) */}
+            <button
+              type="button"
+              onClick={togglePrivacyMode}
+              aria-pressed={isPrivacyMode}
+              aria-label={isPrivacyMode ? 'Bakiyeleri göster' : 'Bakiyeleri gizle'}
+              title={isPrivacyMode ? 'Bakiyeleri göster' : 'Bakiyeleri gizle'}
+              data-testid="privacy-mode-toggle"
+              className={`h-9 w-9 flex items-center justify-center rounded-xl border transition-colors shrink-0 cursor-pointer ${
+                isPrivacyMode
+                  ? 'bg-[#f59e0b]/15 border-[#f59e0b]/40 text-[#f59e0b] hover:bg-[#f59e0b]/25'
+                  : 'bg-[#18181c] border-[#27272a] hover:border-[#3f3f46] text-[#a1a1aa] hover:text-[#f4f4f5]'
+              }`}
+            >
+              {isPrivacyMode ? (
+                <EyeOff className="w-4 h-4" />
+              ) : (
+                <Eye className="w-4 h-4" />
+              )}
+            </button>
+
             <button
               type="button"
               onClick={() => setIsSyncModalOpen(true)}
@@ -1074,12 +1496,45 @@ export default function App() {
           />
         )}
 
+        {/* Bugün, Yarın veya Vadesi Geciken Bekleyen Ödemeler Uyarı Şeridi */}
+        {showDueAlertBanner && (
+          <UpcomingPaymentsBanner
+            summary={dueAlertSummary}
+            displayCurrency={displayCurrency}
+            rates={rates}
+            isPrivacyMode={isPrivacyMode}
+            todayISO={todayISO}
+            onPayReminder={handlePayReminder}
+            onOpenCalendar={() => setActiveView('calendar')}
+            onDismissToday={handleDismissDueAlert}
+          />
+        )}
+
+        {/* Haftalık Özet: En Çok Harcama Yapılan İlk 3 Kategori + Geçen Haftayla Trend + Orantılı Mini Çubuk */}
+        <AnalyticsView
+          mode="weekly-summary"
+          expenses={expenses}
+          displayCurrency={displayCurrency}
+          rates={rates}
+          isPrivacyMode={isPrivacyMode}
+          activeCategory={filters.category}
+          referenceDateISO={todayISO}
+          onSelectCategory={(cat) => {
+            setFilters((prev) => ({
+              ...prev,
+              category: prev.category === cat ? 'ALL' : cat,
+            }));
+            setActiveView('list');
+          }}
+        />
+
         {/* 4 Üst Özet Kartı + Canlı Kur Satırı */}
         <MetricsOverview
           metrics={metrics}
           displayCurrency={displayCurrency}
           rates={rates}
           activeMonthLabel={filters.monthYear === 'ALL' ? 'Tüm Dönemler' : filters.monthYear}
+          isPrivacyMode={isPrivacyMode}
           onSelectTagFilter={toggleTagFilter}
         />
 
@@ -1249,6 +1704,7 @@ export default function App() {
             groups={dateGroups}
             displayCurrency={displayCurrency}
             rates={rates}
+            isPrivacyMode={isPrivacyMode}
             onEdit={(exp) => {
               setEditingExpense(exp);
               setIsManualModalOpen(true);
@@ -1264,8 +1720,12 @@ export default function App() {
         ) : activeView === 'analytics' ? (
           <AnalyticsView
             expenses={filteredExpenses}
+            reminders={reminders}
+            monthYear={filters.monthYear}
+            referenceDateISO={todayISO}
             displayCurrency={displayCurrency}
             rates={rates}
+            isPrivacyMode={isPrivacyMode}
             onSelectCategory={(cat) => {
               setFilters((prev) => ({ ...prev, category: cat }));
               setActiveView('list');
@@ -1278,13 +1738,28 @@ export default function App() {
         ) : (
           <CalendarView
             expenses={filteredExpenses}
+            allExpenses={expenses}
+            reminders={reminders}
             monthYear={filters.monthYear}
             displayCurrency={displayCurrency}
             rates={rates}
+            isPrivacyMode={isPrivacyMode}
             onSelectExpense={(exp) => {
               setEditingExpense(exp);
               setIsManualModalOpen(true);
             }}
+            onAddReminder={(prefillDate) => {
+              setEditingReminder(null);
+              setPrefilledReminderDate(prefillDate || null);
+              setIsReminderModalOpen(true);
+            }}
+            onEditReminder={(rem) => {
+              setEditingReminder(rem);
+              setPrefilledReminderDate(null);
+              setIsReminderModalOpen(true);
+            }}
+            onPayReminder={handlePayReminder}
+            onDeleteReminder={handleDeleteReminder}
           />
         )}
       </main>
@@ -1361,6 +1836,20 @@ export default function App() {
         onSave={handleSaveManualExpense}
       />
 
+      <PaymentReminderModal
+        isOpen={isReminderModalOpen}
+        editingReminder={editingReminder}
+        initialDate={prefilledReminderDate}
+        existingTags={allExistingTags}
+        rates={rates}
+        onClose={() => {
+          setIsReminderModalOpen(false);
+          setEditingReminder(null);
+          setPrefilledReminderDate(null);
+        }}
+        onSave={handleSaveReminder}
+      />
+
       <StatementScannerModal
         isOpen={isScannerOpen}
         existingExpenses={expenses}
@@ -1376,15 +1865,18 @@ export default function App() {
       <AssistantDrawer
         isOpen={isAssistantOpen}
         expenses={expenses}
+        reminders={reminders}
         existingTags={allExistingTags}
         displayCurrency={displayCurrency}
         rates={rates}
+        isPrivacyMode={isPrivacyMode}
         customApiKey={customApiKey}
         isAuthenticated={Boolean(authUser && !isDemoMode)}
         authHeaders={authUser ? buildAuthHeaders(authUser.id, authToken) : {}}
         onSaveApiKey={handleSaveAccountApiKey}
         onClose={() => setIsAssistantOpen(false)}
         onBatchSave={handleBatchSaveExpenses}
+        onBatchSaveReminders={handleBatchSaveReminders}
       />
 
       <DataSyncModal

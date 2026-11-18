@@ -195,6 +195,104 @@ export const SPENTRACK_MCP_TOOLS: McpToolDefinition[] = [
       required: ['id'],
     },
   },
+  {
+    name: 'add_payment_reminder',
+    description:
+      "İleriye dönük bir ödeme hatırlatması / takvim planı ekler (örn: kira, fatura, kredi kartı ödemesi, taksit). Ödendiğinde harcamaya dönüştürülebilir.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Ödeme başlığı (örn: Kira Ödemesi, Enerjisa Elektrik Faturası, Aidat)',
+        },
+        amount: {
+          type: 'number',
+          description: 'Beklenen ödeme tutarı (pozitif sayı)',
+        },
+        currency: {
+          type: 'string',
+          enum: ['TRY', 'USD', 'EUR', 'GBP'],
+          description: 'Para birimi (varsayılan TRY)',
+        },
+        category: {
+          type: 'string',
+          enum: [
+            'Market',
+            'Yeme-İçme',
+            'Ulaşım',
+            'Fatura & Abonelik',
+            'Alışveriş',
+            'Eğlence',
+            'Sağlık',
+            'Diğer',
+          ],
+          description: 'Kategori (varsayılan: başlığa göre tahmin veya Fatura & Abonelik)',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Etiketler (örn: ["#aidat", "#yapikredi"])',
+        },
+        dueDate: {
+          type: 'string',
+          description: 'Son ödeme / hatırlatma tarihi YYYY-MM-DD formatında (örn: 2026-12-05)',
+        },
+        recurrence: {
+          type: 'string',
+          enum: ['once', 'monthly', 'yearly'],
+          description: 'Tekrar sıklığı: once (tek seferlik), monthly (aylık), yearly (yıllık)',
+        },
+        notes: {
+          type: 'string',
+          description: 'Ek açıklama veya abone numarası',
+        },
+      },
+      required: ['title', 'amount', 'dueDate'],
+    },
+  },
+  {
+    name: 'list_payment_reminders',
+    description:
+      'Takvimdeki ileriye dönük, gecikmiş veya ödenmiş ödeme hatırlatmalarını listeler.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['pending', 'paid', 'all'],
+          description: 'Durum filtresi (varsayılan: pending)',
+        },
+        monthYear: {
+          type: 'string',
+          description: 'Opsiyonel dönem filtresi YYYY-MM (örn: 2026-12)',
+        },
+        includeOverdue: {
+          type: 'boolean',
+          description: 'monthYear verilse bile gecikmiş (dueDate < bugün) bekleyenleri dahil et (varsayılan true)',
+        },
+      },
+    },
+  },
+  {
+    name: 'complete_payment_reminder',
+    description:
+      'Belirtilen ID değerine sahip ödeme hatırlatmasını ödendi olarak işaretler, otomatik olarak harcama ekranına gerçek harcama kaydı ekler ve aylık/yıllık ise sonraki dönemi planlar.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Ödendi işaretlenecek hatırlatma kaydının ID değeri',
+        },
+        paidDate: {
+          type: 'string',
+          description: 'Ödemenin yapıldığı tarih YYYY-MM-DD (boşsa bugünün tarihi)',
+        },
+      },
+      required: ['id'],
+    },
+  },
 ];
 
 export function buildMcpServerInfo() {
