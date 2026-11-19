@@ -101,11 +101,11 @@ export function normalizeCategory(raw: string): ExpenseCategory {
   if ((FIXED_CATEGORIES as readonly string[]).includes(clean)) {
     return clean as ExpenseCategory;
   }
-  const lower = clean.toLowerCase();
+  const lower = toAsciiLower(clean);
   if (/market|gida|migros|bim|a101|sok|carrefour|file|kasap|manav/.test(lower)) return 'Market';
   if (/yeme|icme|kahve|restoran|kafe|cafe|starbucks|yemek|getiryemek|trendyolyemek/.test(lower)) return 'Yeme-İçme';
   if (/ulasim|taksi|uber|marti|benzin|akaryakit|opet|shell|petrol|bilet|ucak|otobus|metro|istanbulkart/.test(lower)) return 'Ulaşım';
-  if (/fatura|abonelik|aidat|site\s*y[oö]netim|apartman|kira|netflix|spotify|youtube|icloud|elektrik|su|dogalgaz|internet|turkcell|vodafone|telekom/.test(lower)) return 'Fatura & Abonelik';
+  if (/fatura|abonelik|aidat|site\s*yonetim|apartman|kira|netflix|spotify|youtube|icloud|elektrik|su|dogalgaz|internet|turkcell|vodafone|telekom/.test(lower)) return 'Fatura & Abonelik';
   if (/alisveris|giyim|elektronik|amazon|hepsiburada|trendyol|zara|ikea|boyner/.test(lower)) return 'Alışveriş';
   if (/eglence|sinema|konser|oyun|steam|playstation|tiyatro|etkinlik/.test(lower)) return 'Eğlence';
   if (/saglik|eczane|hastane|doktor|ilac|dis|optik/.test(lower)) return 'Sağlık';
@@ -687,9 +687,9 @@ export function parseInstantAssistantMessage(
     };
   }
 
-  // Harcama ekleme ifadelerini virgül, noktalı virgül veya "ve" bağlacına göre ayır
+  // Ondalık virgülleri (örn: "997,90", "1.250,50") bozmadan harcama ifadelerini ayır
   const clauses = rawMessage
-    .split(/\s*(?:[,;]+|\bve\b)\s*/i)
+    .split(/(?:\s*[;\n]+\s*|\s+\bve\b\s+|\s*(?:(?<!\d),|,(?!\d))\s*)/i)
     .map((c) => c.trim())
     .filter(Boolean);
 
@@ -722,7 +722,7 @@ export function parseInstantAssistantMessage(
 
     // Tutar ve para birimi tespiti
     const amountRegex =
-      /(?:^|\s)(-?\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|-?\d+(?:[.,]\d{1,2})?)\s*(tl|₺|try|lira|türk\s*lirası|turk\s*lirasi|usd|\$|dolar|eur|€|euro|gbp|£|sterlin)?(?=\s|$)/i;
+      /(?:^|\s)(-?\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|-?\d+(?:[.,]\d{1,2})?)\s*(tl|₺|try|lira|türk\s*lirası|turk\s*lirasi|usd|\$|dolar|eur|€|euro|gbp|£|sterlin)?(?=\s|[.!?;:]|$)/i;
     const amountMatch = clauseWithoutInstallment.match(amountRegex);
     if (!amountMatch) continue;
 

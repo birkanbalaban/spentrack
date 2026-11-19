@@ -15,6 +15,7 @@ import {
   maskMonetaryText,
   calculateWeeklyCategorySummary,
   calculateMonthEndHabitProjection,
+  parseInstantAssistantMessage,
 } from './expenseLogic';
 import { Expense, ExtractedExpense } from '../types';
 
@@ -338,3 +339,37 @@ test('calculateMonthEndHabitProjection computes daily habit velocity, remaining 
   assert.equal(proj.topProjectedCategory?.category, 'Market');
   assert.equal(proj.topProjectedCategory?.projectedTotalTRY, 12000);
 });
+
+test('parseInstantAssistantMessage preserves Turkish decimal commas and splits multi-item commas accurately', () => {
+  const single = parseInstantAssistantMessage('997,90 TL gıda ekle', [], '2026-11-19');
+  assert.equal(single.handled, true);
+  assert.equal(single.proposedExpenses.length, 1);
+  assert.equal(single.proposedExpenses[0].amount, 997.9);
+  assert.equal(single.proposedExpenses[0].amountInTRY, 997.9);
+  assert.equal(single.proposedExpenses[0].title, 'Gıda');
+  assert.equal(single.proposedExpenses[0].category, 'Market');
+  assert.ok(single.proposedExpenses[0].tags.includes('#market'));
+
+  const multi = parseInstantAssistantMessage(
+    'Bugün Sağlam Kart ile 220,50 TL kahve, 1.450,75 TL market harcadım',
+    [],
+    '2026-11-19'
+  );
+  assert.equal(multi.handled, true);
+  assert.equal(multi.proposedExpenses.length, 2);
+  assert.equal(multi.proposedExpenses[0].amount, 220.5);
+  assert.equal(multi.proposedExpenses[0].category, 'Yeme-İçme');
+  assert.equal(multi.proposedExpenses[1].amount, 1450.75);
+  assert.equal(multi.proposedExpenses[1].category, 'Market');
+
+  const multiAfterAmount = parseInstantAssistantMessage(
+    'kahve 220,50, market 997,90',
+    [],
+    '2026-11-19'
+  );
+  assert.equal(multiAfterAmount.handled, true);
+  assert.equal(multiAfterAmount.proposedExpenses.length, 2);
+  assert.equal(multiAfterAmount.proposedExpenses[0].amount, 220.5);
+  assert.equal(multiAfterAmount.proposedExpenses[1].amount, 997.9);
+});
+

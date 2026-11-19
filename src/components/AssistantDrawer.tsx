@@ -120,6 +120,24 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     return () => clearInterval(interval);
   }, [loading]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
+  const formatEditableAmountTR = (amount: number): string => {
+    if (!amount) return '';
+    return Number.isInteger(amount)
+      ? String(amount)
+      : amount.toFixed(2).replace('.', ',');
+  };
+
   if (!isOpen) return null;
 
   const handleAttach = async (files: FileList | null) => {
@@ -515,9 +533,18 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="SpenTrack AI Asistan Paneli"
-      className="fixed inset-0 z-50 flex justify-end bg-black/60"
+      data-testid="assistant-drawer-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+      className="fixed inset-0 z-50 flex justify-end bg-black/60 cursor-pointer"
     >
-      <div className="w-full max-w-md bg-[#18181b] border-l border-[#27272a] h-full flex flex-col shadow-2xl">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[90vw] sm:w-full max-w-md bg-[#18181b] border-l border-[#27272a] h-full flex flex-col shadow-2xl cursor-default"
+      >
         {/* Üst Başlık */}
         <div className="px-5 py-4 border-b border-[#27272a] flex items-center justify-between gap-2">
           <div>
@@ -699,13 +726,20 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                                 <input
                                   type={isPrivacyMode && cand.amount !== 0 ? 'password' : 'text'}
                                   inputMode="decimal"
+                                  enterKeyHint="done"
+                                  autoComplete="off"
                                   aria-label={`Tutar (${cand.title})`}
                                   placeholder="Tutar girin"
-                                  defaultValue={cand.amount !== 0 ? String(cand.amount) : ''}
+                                  defaultValue={formatEditableAmountTR(cand.amount)}
                                   onChange={(e) =>
                                     updateProposedCandidateAmount(msg.id, cand.tempId, e.target.value)
                                   }
-                                  className={`w-24 text-right px-2 py-1 rounded bg-[#09090b] border font-mono tabular-nums text-xs font-semibold focus:outline-none ${
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.currentTarget.blur();
+                                    }
+                                  }}
+                                  className={`w-28 sm:w-24 text-left px-2.5 py-1.5 rounded bg-[#09090b] border font-mono text-base sm:text-xs leading-normal font-semibold appearance-none caret-[#10b981] focus:outline-none ${
                                     cand.amount === 0
                                       ? 'border-[#f59e0b] text-[#f59e0b] placeholder-[#f59e0b]/70'
                                       : 'border-[#27272a] text-[#f4f4f5] focus:border-[#10b981]'
@@ -794,13 +828,20 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                                 <input
                                   type={isPrivacyMode && rem.amount > 0 ? 'password' : 'text'}
                                   inputMode="decimal"
+                                  enterKeyHint="done"
+                                  autoComplete="off"
                                   aria-label={`Hatırlatma Tutarı (${rem.title})`}
                                   placeholder="Tutar"
-                                  defaultValue={rem.amount > 0 ? String(rem.amount) : ''}
+                                  defaultValue={formatEditableAmountTR(rem.amount)}
                                   onChange={(e) =>
                                     updateProposedReminderAmount(msg.id, rem.tempId, e.target.value)
                                   }
-                                  className={`w-24 text-right px-2 py-1 rounded bg-[#09090b] border font-mono tabular-nums text-xs font-semibold focus:outline-none ${
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.currentTarget.blur();
+                                    }
+                                  }}
+                                  className={`w-28 sm:w-24 text-left px-2.5 py-1.5 rounded bg-[#09090b] border font-mono text-base sm:text-xs leading-normal font-semibold appearance-none caret-[#f59e0b] focus:outline-none ${
                                     rem.amount <= 0
                                       ? 'border-[#f59e0b] text-[#f59e0b] placeholder-[#f59e0b]/70'
                                       : 'border-[#27272a] text-[#f4f4f5] focus:border-[#f59e0b]'
@@ -964,7 +1005,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                 }
               }}
               placeholder="Harcama yazın veya soru sorun..."
-              className="flex-1 px-3.5 py-2.5 text-xs bg-[#09090b] border border-[#27272a] rounded-lg text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
+              className="flex-1 px-3.5 py-2.5 text-base sm:text-xs leading-normal appearance-none caret-[#10b981] bg-[#09090b] border border-[#27272a] rounded-lg text-[#f4f4f5] placeholder-[#71717a] focus:outline-none focus:border-[#10b981]"
             />
             <button
               type="button"

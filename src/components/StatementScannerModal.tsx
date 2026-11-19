@@ -724,6 +724,8 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                           <input
                             type="number"
                             step="0.01"
+                            inputMode="decimal"
+                            enterKeyHint="done"
                             aria-label="Tutar"
                             value={row.amount}
                             onChange={(e) => {
@@ -733,7 +735,12 @@ export const StatementScannerModal: React.FC<StatementScannerModalProps> = ({
                                 amountInTRY: val,
                               });
                             }}
-                            className={`w-24 text-right bg-[#09090b] border border-[#27272a] rounded px-2 py-0.5 text-xs font-mono tabular-nums font-semibold ${
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            className={`w-28 sm:w-24 text-left bg-[#09090b] border border-[#27272a] rounded px-2.5 py-1 text-base sm:text-xs leading-normal appearance-none font-mono font-semibold caret-[#10b981] focus:outline-none focus:border-[#10b981] ${
                               row.amount < 0 ? 'text-[#10b981]' : 'text-[#f4f4f5]'
                             }`}
                           />
